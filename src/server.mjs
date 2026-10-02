@@ -22,6 +22,14 @@ import { openTranscription, synthesizeSpeech } from './speech.mjs';
 import { advisorTurn } from './brain.mjs';
 import { issueCallSession, validateStartIdentity, verifyTwilioRequest } from './security.mjs';
 import { buildReadiness, canAcceptTraffic } from './readiness.mjs';
+import { beginBrainRequest, endCall, finishBrainRequest } from './call-lifecycle.mjs';
+import {
+  acknowledgePlaybackMark,
+  beginPlayback,
+  failPlaybackGeneration,
+  finishPlaybackGeneration,
+  invalidatePlayback,
+} from './playback.mjs';
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -123,6 +131,9 @@ wss.on('connection', (ws) => {
     dg: null,
     speaking: false,
     ttsAbort: null,
+    playbackGeneration: 0,
+    activePlaybackGeneration: null,
+    playbackMark: null,
     processing: false,
     closeAfterMark: null,
     markSeq: 0,
@@ -131,6 +142,8 @@ wss.on('connection', (ws) => {
     audioBytes: 0,
     turnCount: 0,
     callTimer: null,
+    ended: false,
+    brainAbort: null,
   };
 
   ws.on('message', (raw) => {
@@ -187,11 +200,13 @@ function onStart(ws, state, msg) {
 }
 
 function openSpeechRecognition(ws, state) {
-  if (state.dg || !state.disclosureComplete) return;
+  if (state.ended || state.dg || !state.disclosureComplete) return;
   state.dg = openTranscription({
-    onFinal: (text) => handleUtterance(ws, state, text),
+    onFinal: (text) => {
+      if (!state.ended) handleUtterance(ws, state, text);
+    },
     onInterim: (text) => {
-      if (state.speaking && text && text.length > 2) stopSpeaking(ws, state);
+      if (!state.ended && state.speaking && text && text.length > 2) stopSpeaking(ws, state);
     },
     onError: (err) => console.error('[dg] error:', String(err).slice(0, 200)),
   });
@@ -211,7 +226,7 @@ function onMedia(ws, state, msg) {
 }
 
 async function handleUtterance(ws, state, text) {
-  if (!state.disclosureComplete || !text || text.length > 2_000) return;
+  if (state.ended || !state.disclosureComplete || !text || text.length > 2_000) return;
   if (state.speaking) stopSpeaking(ws, state);
   if (state.processing) return; // one turn at a time
   state.turnCount += 1;
@@ -231,6 +246,11 @@ async function handleUtterance(ws, state, text) {
     return;
   }
 
+  const brainController = beginBrainRequest(state);
+  if (!brainController) {
+    state.processing = false;
+    return;
+  }
   const result = await advisorTurn({
     text,
     profile: state.profile,
@@ -238,7 +258,9 @@ async function handleUtterance(ws, state, text) {
     language: state.language,
     isFirst: state.isFirst,
     history: state.history,
+    signal: brainController.signal,
   });
+  if (!finishBrainRequest(state, brainController)) return;
   state.isFirst = false;
 
   let reply;
@@ -256,42 +278,57 @@ async function handleUtterance(ws, state, text) {
 
 // --- Speaking (TTS → Twilio) -------------------------------------------------
 function say(ws, state, text, mark = 'eos') {
-  if (!text) return;
-  state.speaking = true;
+  if (state.ended || !text) return;
   const controller = new AbortController();
-  state.ttsAbort = controller;
+  const generation = beginPlayback(state, controller);
   synthesizeSpeech({
     text,
     signal: controller.signal,
-    onChunk: (chunk) => sendAudio(ws, state, chunk),
+    onChunk: (chunk) => {
+      if (state.activePlaybackGeneration === generation) sendAudio(ws, state, chunk);
+    },
   })
     .then(() => {
+      if (state.activePlaybackGeneration !== generation) return;
       const sent = sendMark(ws, state, mark);
+      if (!finishPlaybackGeneration(state, generation, sent)) return;
       if (mark === 'intro') state.disclosureMark = sent;
     })
     .catch((err) => {
-      console.error('[tts] failed:', String(err).slice(0, 200));
-      if (mark === 'intro') ws.close(1011, 'disclosure unavailable');
-    })
-    .finally(() => {
-      if (state.ttsAbort === controller) {
-        state.speaking = false;
-        state.ttsAbort = null;
+      if (failPlaybackGeneration(state, generation)) {
+        console.error('[tts] failed:', String(err).slice(0, 200));
+        if (mark === 'intro') ws.close(1011, 'disclosure unavailable');
       }
     });
 }
 
 function sayThenHangup(ws, state, text) {
-  state.speaking = true;
+  if (state.ended || !text) return;
   const controller = new AbortController();
-  state.ttsAbort = controller;
-  synthesizeSpeech({ text, signal: controller.signal, onChunk: (chunk) => sendAudio(ws, state, chunk) })
-    .catch(() => {})
-    .finally(() => {
-      state.speaking = false;
-      state.ttsAbort = null;
-      // Close the stream once this final audio has actually played out.
-      state.closeAfterMark = sendMark(ws, state, 'bye');
+  const generation = beginPlayback(state, controller);
+  synthesizeSpeech({
+    text,
+    signal: controller.signal,
+    onChunk: (chunk) => {
+      if (state.activePlaybackGeneration === generation) sendAudio(ws, state, chunk);
+    },
+  })
+    .then(() => {
+      if (state.activePlaybackGeneration !== generation) return;
+      const sent = sendMark(ws, state, 'bye');
+      if (finishPlaybackGeneration(state, generation, sent)) {
+        // Close the stream once this final audio has actually played out.
+        state.closeAfterMark = sent;
+      }
+    })
+    .catch(() => {
+      if (failPlaybackGeneration(state, generation)) {
+        try {
+          ws.close(1011, 'goodbye unavailable');
+        } catch {
+          /* ignore */
+        }
+      }
     });
 }
 
@@ -320,12 +357,14 @@ function sendMark(ws, state, name) {
 function onMark(ws, state, msg) {
   if (!state.streamSid || msg.streamSid !== state.streamSid) return;
   const name = msg.mark?.name;
+  const completedPlayback = acknowledgePlaybackMark(state, name);
   if (name && state.disclosureMark && name === state.disclosureMark) {
     state.disclosureComplete = true;
     state.disclosureMark = null;
     openSpeechRecognition(ws, state);
   }
-  if (name && state.closeAfterMark && name === state.closeAfterMark) {
+  if (completedPlayback && name && state.closeAfterMark && name === state.closeAfterMark) {
+    state.closeAfterMark = null;
     try {
       ws.close();
     } catch {
@@ -335,15 +374,15 @@ function onMark(ws, state, msg) {
 }
 
 function stopSpeaking(ws, state) {
-  if (state.ttsAbort) {
+  const controller = invalidatePlayback(state);
+  if (controller) {
     try {
-      state.ttsAbort.abort();
+      controller.abort();
     } catch {
       /* ignore */
     }
-    state.ttsAbort = null;
   }
-  state.speaking = false;
+  state.closeAfterMark = null;
   // Flush any audio Twilio has buffered but not yet played.
   if (state.streamSid && ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify({ event: 'clear', streamSid: state.streamSid }));
@@ -351,10 +390,19 @@ function stopSpeaking(ws, state) {
 }
 
 function cleanup(state) {
+  const brainController = endCall(state);
+  try {
+    brainController?.abort();
+  } catch {
+    /* ignore */
+  }
   if (state.callTimer) clearTimeout(state.callTimer);
   state.callTimer = null;
+  const controller = invalidatePlayback(state);
+  state.closeAfterMark = null;
+  state.disclosureMark = null;
   try {
-    state.ttsAbort?.abort();
+    controller?.abort();
   } catch {
     /* ignore */
   }
@@ -384,6 +432,9 @@ function isGoodbye(text) {
  * @property {any} dg
  * @property {boolean} speaking
  * @property {AbortController|null} ttsAbort
+ * @property {number} playbackGeneration
+ * @property {number|null} activePlaybackGeneration
+ * @property {string|null} playbackMark
  * @property {boolean} processing
  * @property {string|null} closeAfterMark
  * @property {number} markSeq
@@ -392,6 +443,8 @@ function isGoodbye(text) {
  * @property {number} audioBytes
  * @property {number} turnCount
  * @property {ReturnType<typeof setTimeout>|null} callTimer
+ * @property {boolean} ended
+ * @property {AbortController|null} brainAbort
  */
 
 server.listen(config.port, () => {
