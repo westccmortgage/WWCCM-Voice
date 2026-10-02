@@ -39,11 +39,13 @@ export function openDeepgram({ onFinal, onInterim, onOpen, onError }) {
 
   let open = false;
   const pending = [];
+  let pendingBytes = 0;
 
   ws.on('open', () => {
     open = true;
     for (const buf of pending) ws.send(buf);
     pending.length = 0;
+    pendingBytes = 0;
     onOpen && onOpen();
   });
 
@@ -73,7 +75,12 @@ export function openDeepgram({ onFinal, onInterim, onOpen, onError }) {
   return {
     sendAudio(buf) {
       if (open && ws.readyState === WebSocket.OPEN) ws.send(buf);
-      else pending.push(buf);
+      else if (pendingBytes + buf.length <= 512 * 1024) {
+        pending.push(buf);
+        pendingBytes += buf.length;
+      } else {
+        onError && onError(new Error('Deepgram startup audio buffer limit reached'));
+      }
     },
     finish() {
       // Ask Deepgram to flush any buffered audio into a final result.
@@ -84,6 +91,8 @@ export function openDeepgram({ onFinal, onInterim, onOpen, onError }) {
       }
     },
     close() {
+      pending.length = 0;
+      pendingBytes = 0;
       try {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'CloseStream' }));
       } catch {
