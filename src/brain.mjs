@@ -20,14 +20,18 @@ const TIMEOUT_MS = 12_000;
  * @param {string} args.language        en|ru|es|zh
  * @param {boolean} args.isFirst        first caller utterance of the call
  * @param {{role:string,text:string}[]} args.history recent turns
+ * @param {AbortSignal} [args.signal]    call-lifecycle cancellation
  * @returns {Promise<{reply:string, profile:object, pendingField:string|null, numbers:object, readyForOptions:boolean, source:string}|null>}
  */
-export async function advisorTurn({ text, profile, pendingField, language, isFirst, history }) {
+export async function advisorTurn({ text, profile, pendingField, language, isFirst, history, signal }) {
   if (!config.voiceTurnUrl || !config.voiceSharedSecret) {
     console.error('[brain] VOICE_TURN_URL / VOICE_SHARED_SECRET not configured');
     return null;
   }
   const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) return null;
+  signal?.addEventListener('abort', cancel, { once: true });
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const headers = {
@@ -71,5 +75,6 @@ export async function advisorTurn({ text, profile, pendingField, language, isFir
     return null;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', cancel);
   }
 }
