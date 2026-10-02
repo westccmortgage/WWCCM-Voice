@@ -9,7 +9,7 @@ export const config = {
   port: Number(process.env.PORT) || 8080,
 
   // The advisor "brain" endpoint in the Wallet WCCM site (image repo):
-  //   https://wwccm.com/api/voice-advisor-turn
+  //   https://walletwccm.com/api/voice-advisor-turn
   voiceTurnUrl: process.env.VOICE_TURN_URL || '',
   voiceSharedSecret: process.env.VOICE_SHARED_SECRET || '',
 

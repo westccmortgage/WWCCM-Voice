@@ -1,6 +1,6 @@
 # WWCCM-Voice
 
-Phone agent for **Wallet WCCM** (wwccm.com). It answers calls with the *same*
+Phone agent for **Wallet WCCM** (walletwccm.com). It answers calls with the *same*
 mortgage-strategy brain as the website chat — deterministic parsing, intake order,
 and the verified cash-to-close calculators — so the numbers on the phone and on
 the site always match.
@@ -45,7 +45,7 @@ See [`.env.example`](./.env.example). Secrets are set in the Render dashboard.
 
 | Var | What |
 | --- | --- |
-| `VOICE_TURN_URL` | Brain endpoint, e.g. `https://wwccm.com/api/voice-advisor-turn` |
+| `VOICE_TURN_URL` | Brain endpoint: `https://walletwccm.com/api/voice-advisor-turn` |
 | `VOICE_SHARED_SECRET` | Must equal `VOICE_SHARED_SECRET` on the Netlify site |
 | `AGENT_LANGUAGE` | `en` \| `ru` \| `es` \| `zh` |
 | `DEEPGRAM_API_KEY` / `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | Speech-to-text |
@@ -71,7 +71,9 @@ the Wallet WCCM site. If enabled, its provider is decided **in the brain**:
    this repo. Use the **Starter** plan (always-on) — *not Free*, which sleeps and
    would make callers wait 30–50s.
 3. Set the `sync: false` env vars (secrets) in the dashboard.
-4. Deploy. Health check is `GET /health`.
+4. Deploy. Render's process-liveness check is `GET /health`. Operational
+   readiness is `GET /ready`; it returns 503 until every required credential is
+   configured. `/voice` and `/media` also remain fail-closed while unready.
 
 ## Point Twilio at it
 

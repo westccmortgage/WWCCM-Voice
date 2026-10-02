@@ -22,24 +22,34 @@ import { openDeepgram } from './deepgram.mjs';
 import { speak } from './elevenlabs.mjs';
 import { advisorTurn } from './brain.mjs';
 import { issueCallSession, validateStartIdentity, verifyTwilioRequest } from './security.mjs';
+import { buildReadiness, canAcceptTraffic } from './readiness.mjs';
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
 function readiness() {
-  const missing = [];
-  if (!config.twilioAuthToken) missing.push('TWILIO_AUTH_TOKEN');
-  if (!config.voiceTurnUrl) missing.push('VOICE_TURN_URL');
-  if (!config.voiceSharedSecret) missing.push('VOICE_SHARED_SECRET');
-  if (!config.deepgram.apiKey) missing.push('DEEPGRAM_API_KEY');
-  if (!config.elevenlabs.apiKey) missing.push('ELEVENLABS_API_KEY');
-  if (!config.elevenlabs.voiceId) missing.push('ELEVENLABS_VOICE_ID');
-  return { ready: missing.length === 0, missing };
+  return buildReadiness(config);
 }
 
 app.get('/health', (_req, res) => {
   const status = readiness();
-  res.status(status.ready ? 200 : 503).json({ ok: status.ready, service: 'wwccm-voice', ...status });
+  res.json({
+    ok: true,
+    service: 'wwccm-voice',
+    configured: status.ready,
+    ready: status.ready,
+    missing: status.missing,
+  });
+});
+app.get('/ready', (_req, res) => {
+  const status = readiness();
+  res.status(status.ready ? 200 : 503).json({
+    ok: status.ready,
+    service: 'wwccm-voice',
+    configured: status.ready,
+    ready: status.ready,
+    missing: status.missing,
+  });
 });
 app.get('/', (_req, res) => {
   const status = readiness();
@@ -48,7 +58,7 @@ app.get('/', (_req, res) => {
 
 // --- Twilio voice webhook: return TwiML that starts the media stream ---------
 app.post('/voice', (req, res) => {
-  if (!readiness().ready) {
+  if (!canAcceptTraffic(config)) {
     console.error('[voice] required configuration is missing; rejecting request');
     return res.status(503).send('Unavailable');
   }
@@ -87,7 +97,7 @@ server.on('upgrade', (req, socket, head) => {
     socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
     socket.destroy();
   };
-  if (!config.twilioAuthToken) return reject(503, 'Service Unavailable');
+  if (!canAcceptTraffic(config)) return reject(503, 'Service Unavailable');
   let pathname;
   try {
     pathname = new URL(req.url || '/', 'https://invalid.local').pathname;
