@@ -97,7 +97,11 @@ export function openCloudflareTranscription(
       }
       finalSegments.push(transcript);
     }
-    if (message.speech_final) {
+    // Deepgram's explicit Finalize control can complete a buffered utterance
+    // with `from_finalize: true` without also setting `speech_final`. Treat
+    // either marker as an utterance boundary so callers do not wait forever
+    // after deliberately flushing end-of-audio.
+    if (message.speech_final || message.from_finalize) {
       const utterance = finalSegments.join(' ').trim();
       finalSegments = [];
       if (utterance) onFinal?.(utterance);
