@@ -112,6 +112,80 @@ test('Cloudflare Nova-3 streams raw Twilio mu-law and parses interim/final event
   assert.equal(socket.closed, true);
 });
 
+test('Cloudflare Nova-3 emits buffered transcript when Finalize completes without speech_final', () => {
+  const final = [];
+  const stt = openCloudflareTranscription(
+    { onFinal: (text) => final.push(text), onError: assert.fail },
+    { WebSocketImpl: MockWebSocket, settings: SETTINGS },
+  );
+  const socket = MockWebSocket.instances[0];
+  socket.readyState = MockWebSocket.OPEN;
+  socket.emit('open');
+
+  socket.emit(
+    'message',
+    Buffer.from(
+      JSON.stringify({
+        is_final: true,
+        speech_final: false,
+        channel: { alternatives: [{ transcript: 'cloudflare voice' }] },
+      }),
+    ),
+    false,
+  );
+  socket.emit(
+    'message',
+    Buffer.from(
+      JSON.stringify({
+        is_final: true,
+        from_finalize: true,
+        channel: { alternatives: [{ transcript: 'smoke test seven' }] },
+      }),
+    ),
+    false,
+  );
+
+  assert.deepEqual(final, ['cloudflare voice smoke test seven']);
+  stt.close();
+});
+
+test('Cloudflare Nova-3 empty Finalize completion flushes prior finalized segments', () => {
+  const final = [];
+  const stt = openCloudflareTranscription(
+    { onFinal: (text) => final.push(text), onError: assert.fail },
+    { WebSocketImpl: MockWebSocket, settings: SETTINGS },
+  );
+  const socket = MockWebSocket.instances[0];
+  socket.readyState = MockWebSocket.OPEN;
+  socket.emit('open');
+
+  socket.emit(
+    'message',
+    Buffer.from(
+      JSON.stringify({
+        is_final: true,
+        speech_final: false,
+        channel: { alternatives: [{ transcript: 'buffered transcript' }] },
+      }),
+    ),
+    false,
+  );
+  socket.emit(
+    'message',
+    Buffer.from(
+      JSON.stringify({
+        is_final: true,
+        from_finalize: true,
+        channel: { alternatives: [{ transcript: '' }] },
+      }),
+    ),
+    false,
+  );
+
+  assert.deepEqual(final, ['buffered transcript']);
+  stt.close();
+});
+
 test('Cloudflare Aura requests raw headerless mu-law/8k and streams binary audio', async () => {
   const chunks = [];
   const completion = speakCloudflare(
