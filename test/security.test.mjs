@@ -93,3 +93,38 @@ test('whitespace-only configuration remains unready', () => {
   assert.equal(buildReadiness(whitespace).missing.length, 6);
   assert.equal(canAcceptTraffic(whitespace), false);
 });
+
+test('Cloudflare speech readiness needs gateway coordinates and token, not separate speech accounts', () => {
+  const base = {
+    twilioAuthToken: 'twilio',
+    voiceTurnUrl: 'https://walletwccm.com/api/voice-advisor-turn',
+    voiceSharedSecret: 'shared',
+    speech: { provider: 'cloudflare-workers-ai', cloudflare: {} },
+    deepgram: {},
+    elevenlabs: {},
+  };
+  assert.deepEqual(buildReadiness(base).missing, [
+    'CLOUDFLARE_ACCOUNT_ID',
+    'CLOUDFLARE_AI_GATEWAY_ID',
+    'CLOUDFLARE_AI_GATEWAY_TOKEN',
+  ]);
+  const configured = {
+    ...base,
+    speech: {
+      provider: 'cloudflare-workers-ai',
+      cloudflare: { accountId: 'account', gatewayId: 'gateway', gatewayToken: 'token' },
+    },
+  };
+  assert.deepEqual(buildReadiness(configured), { ready: true, missing: [] });
+});
+
+test('unknown speech provider fails closed', () => {
+  const status = buildReadiness({
+    twilioAuthToken: 'twilio',
+    voiceTurnUrl: 'url',
+    voiceSharedSecret: 'shared',
+    speech: { provider: 'unknown' },
+  });
+  assert.equal(status.ready, false);
+  assert.deepEqual(status.missing, ['SPEECH_PROVIDER']);
+});

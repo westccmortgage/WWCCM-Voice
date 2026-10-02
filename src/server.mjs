@@ -18,8 +18,7 @@ import http from 'node:http';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { config, disclosuresFor } from './config.mjs';
-import { openDeepgram } from './deepgram.mjs';
-import { speak } from './elevenlabs.mjs';
+import { openTranscription, synthesizeSpeech } from './speech.mjs';
 import { advisorTurn } from './brain.mjs';
 import { issueCallSession, validateStartIdentity, verifyTwilioRequest } from './security.mjs';
 import { buildReadiness, canAcceptTraffic } from './readiness.mjs';
@@ -189,7 +188,7 @@ function onStart(ws, state, msg) {
 
 function openSpeechRecognition(ws, state) {
   if (state.dg || !state.disclosureComplete) return;
-  state.dg = openDeepgram({
+  state.dg = openTranscription({
     onFinal: (text) => handleUtterance(ws, state, text),
     onInterim: (text) => {
       if (state.speaking && text && text.length > 2) stopSpeaking(ws, state);
@@ -261,7 +260,7 @@ function say(ws, state, text, mark = 'eos') {
   state.speaking = true;
   const controller = new AbortController();
   state.ttsAbort = controller;
-  speak({
+  synthesizeSpeech({
     text,
     signal: controller.signal,
     onChunk: (chunk) => sendAudio(ws, state, chunk),
@@ -286,7 +285,7 @@ function sayThenHangup(ws, state, text) {
   state.speaking = true;
   const controller = new AbortController();
   state.ttsAbort = controller;
-  speak({ text, signal: controller.signal, onChunk: (chunk) => sendAudio(ws, state, chunk) })
+  synthesizeSpeech({ text, signal: controller.signal, onChunk: (chunk) => sendAudio(ws, state, chunk) })
     .catch(() => {})
     .finally(() => {
       state.speaking = false;
@@ -398,8 +397,14 @@ function isGoodbye(text) {
 server.listen(config.port, () => {
   console.log(`[wwccm-voice] listening on :${config.port}`);
   if (!config.voiceTurnUrl) console.warn('[wwccm-voice] WARNING: VOICE_TURN_URL not set — the brain is unreachable.');
-  if (!config.deepgram.apiKey) console.warn('[wwccm-voice] WARNING: DEEPGRAM_API_KEY not set.');
-  if (!config.elevenlabs.apiKey) console.warn('[wwccm-voice] WARNING: ELEVENLABS_API_KEY not set.');
+  if (config.speech.provider === 'cloudflare-workers-ai') {
+    if (!config.speech.cloudflare.accountId) console.warn('[wwccm-voice] WARNING: CLOUDFLARE_ACCOUNT_ID not set.');
+    if (!config.speech.cloudflare.gatewayId) console.warn('[wwccm-voice] WARNING: CLOUDFLARE_AI_GATEWAY_ID not set.');
+    if (!config.speech.cloudflare.gatewayToken) console.warn('[wwccm-voice] WARNING: CLOUDFLARE_AI_GATEWAY_TOKEN not set.');
+  } else {
+    if (!config.deepgram.apiKey) console.warn('[wwccm-voice] WARNING: DEEPGRAM_API_KEY not set.');
+    if (!config.elevenlabs.apiKey) console.warn('[wwccm-voice] WARNING: ELEVENLABS_API_KEY not set.');
+  }
   if (!config.twilioAuthToken) console.warn('[wwccm-voice] LOCKED: TWILIO_AUTH_TOKEN not set; voice and media endpoints reject all traffic.');
   if (!config.voiceSharedSecret) console.warn('[wwccm-voice] LOCKED: VOICE_SHARED_SECRET not set; brain requests are disabled.');
 });

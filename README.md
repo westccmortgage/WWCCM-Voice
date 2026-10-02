@@ -52,6 +52,29 @@ See [`.env.example`](./.env.example). Secrets are set in the Render dashboard.
 | `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` / `ELEVENLABS_MODEL_ID` | Text-to-speech |
 | `TWILIO_AUTH_TOKEN` | Required — verifies `/voice`, `/media`, and binds each media stream to its signed call |
 
+### Local-only Cloudflare speech adapter
+
+The code includes a disabled provider-neutral path for Cloudflare-hosted
+`@cf/deepgram/nova-3` STT and `@cf/deepgram/aura-1` TTS through AI Gateway. The
+deployed default remains `SPEECH_PROVIDER=legacy`; do not switch production until
+Workers AI entitlement, gateway authentication, and expected billing are
+explicitly verified.
+
+To select it after approval, set `SPEECH_PROVIDER=cloudflare-workers-ai` plus
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_AI_GATEWAY_ID`, and
+`CLOUDFLARE_AI_GATEWAY_TOKEN`. It requests raw, containerless G.711 mu-law at
+8 kHz for direct Twilio playback. A prior text-model request through the same
+gateway does not establish that the token is authorized for Workers AI speech.
+The deterministic Wallet WCCM brain still owns every mortgage number and reply;
+the speech adapter only transcribes and synthesizes audio.
+
+Remaining rollout gates are external and intentionally untested here: the token
+must authenticate the named AI Gateway, the same Cloudflare account must be
+entitled to run the two Workers AI partner models, and billing/spend approval
+must exist for their metered usage. Offline readiness validates only that the
+three configuration fields are nonempty; it does not claim those permissions or
+credits are valid.
+
 ### Which AI model speaks?
 
 The production phone path uses deterministic engine copy by default. Optional AI
@@ -110,6 +133,8 @@ request host automatically.
 | `src/server.mjs` | Express webhook + Media Stream WebSocket, call orchestration |
 | `src/deepgram.mjs` | Deepgram live STT socket |
 | `src/elevenlabs.mjs` | ElevenLabs streaming TTS (`ulaw_8000`) |
+| `src/speech.mjs` | Provider-neutral STT/TTS selection seam |
+| `src/cloudflare-speech.mjs` | Disabled Cloudflare Workers AI Nova-3/Aura adapter |
 | `src/brain.mjs` | Client for the advisor brain (`/api/voice-advisor-turn`) |
 | `src/config.mjs` | Env config + multilingual disclosures/greeting |
 | `render.yaml` | Render Blueprint (always-on Web Service) |

@@ -13,6 +13,21 @@ export const config = {
   voiceTurnUrl: process.env.VOICE_TURN_URL || '',
   voiceSharedSecret: process.env.VOICE_SHARED_SECRET || '',
 
+  // Default remains the currently deployed adapters. The Cloudflare path is
+  // local-only until its Workers AI entitlement and gateway token are verified.
+  speech: {
+    provider: (process.env.SPEECH_PROVIDER || 'legacy').toLowerCase(),
+    cloudflare: {
+      accountId: process.env.CLOUDFLARE_ACCOUNT_ID || '',
+      gatewayId: process.env.CLOUDFLARE_AI_GATEWAY_ID || '',
+      gatewayToken: process.env.CLOUDFLARE_AI_GATEWAY_TOKEN || '',
+      sttModel: process.env.CLOUDFLARE_STT_MODEL || '@cf/deepgram/nova-3',
+      ttsModel: process.env.CLOUDFLARE_TTS_MODEL || '@cf/deepgram/aura-1',
+      speaker: process.env.CLOUDFLARE_TTS_SPEAKER || 'asteria',
+      language: process.env.DEEPGRAM_LANGUAGE || process.env.AGENT_LANGUAGE || 'en',
+    },
+  },
+
   // Spoken language for the whole call (brain + greeting). en | ru | es | zh.
   language: (process.env.AGENT_LANGUAGE || 'en').toLowerCase(),
 
