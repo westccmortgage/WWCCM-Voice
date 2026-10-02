@@ -70,6 +70,7 @@ test('liveness can remain healthy while readiness and traffic stay fail closed',
   const status = buildReadiness({ deepgram: {}, elevenlabs: {} });
   assert.equal(status.ready, false);
   assert.deepEqual(status.missing, [
+    'VOICE_RUNTIME_ENABLED',
     'TWILIO_AUTH_TOKEN',
     'VOICE_TURN_URL',
     'VOICE_SHARED_SECRET',
@@ -90,12 +91,13 @@ test('whitespace-only configuration remains unready', () => {
     elevenlabs: { apiKey: '\r', voiceId: '   ' },
   };
   assert.equal(buildReadiness(whitespace).ready, false);
-  assert.equal(buildReadiness(whitespace).missing.length, 6);
+  assert.equal(buildReadiness(whitespace).missing.length, 7);
   assert.equal(canAcceptTraffic(whitespace), false);
 });
 
 test('Cloudflare speech readiness needs gateway coordinates and token, not separate speech accounts', () => {
   const base = {
+    runtimeEnabled: true,
     twilioAuthToken: 'twilio',
     voiceTurnUrl: 'https://walletwccm.com/api/voice-advisor-turn',
     voiceSharedSecret: 'shared',
@@ -120,6 +122,7 @@ test('Cloudflare speech readiness needs gateway coordinates and token, not separ
 
 test('unknown speech provider fails closed', () => {
   const status = buildReadiness({
+    runtimeEnabled: true,
     twilioAuthToken: 'twilio',
     voiceTurnUrl: 'url',
     voiceSharedSecret: 'shared',

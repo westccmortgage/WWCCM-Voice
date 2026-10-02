@@ -5,8 +5,11 @@
 // California is a two-party consent state for call recording, and the caller must
 // be told they are speaking with an AI assistant, not a licensed loan officer.
 
+import { boundedInteger } from './usage-limits.mjs';
+
 export const config = {
   port: Number(process.env.PORT) || 8080,
+  runtimeEnabled: process.env.VOICE_RUNTIME_ENABLED === 'true',
 
   // The advisor "brain" endpoint in the Wallet WCCM site (image repo):
   //   https://walletwccm.com/api/voice-advisor-turn
@@ -47,6 +50,15 @@ export const config = {
   // Required: all webhook and WebSocket traffic is rejected when absent.
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
 
+  // Hard provider-usage ceilings. For a bounded acceptance call these can be
+  // tightened without changing code (for example 120 seconds / 6 turns / 8000
+  // synthesized characters). Invalid values fall back to the reviewed limits.
+  limits: {
+    maxCallSeconds: boundedInteger(process.env.MAX_CALL_SECONDS, 1_800, { min: 30, max: 1_800 }),
+    maxTurns: boundedInteger(process.env.MAX_CONVERSATION_TURNS, 60, { min: 1, max: 60 }),
+    maxTtsCharacters: boundedInteger(process.env.MAX_TTS_CHARACTERS, 25_000, { min: 500, max: 100_000 }),
+  },
+
   // Business facts spoken on request — never cross these numbers.
   nmls: {
     companyNmls: '2817729',
@@ -58,11 +70,11 @@ export const config = {
 export const DISCLOSURES = {
   en: {
     recording:
-      "Hi, you've reached West Coast Capital Mortgage. This call may be recorded and processed by an automated assistant for quality and to help plan your mortgage scenario.",
+      "Hi, you've reached West Coast Capital Mortgage. This call may be recorded for quality.",
     ai:
-      "My name is Emma. I'm your A I assistant, not a licensed loan officer. Everything is an estimate for planning only, and a licensed broker reviews every scenario.",
+      "My name is Emma. I'm your A I assistant, not a licensed loan officer. Any figures are planning estimates, and a licensed broker reviews every scenario.",
     greeting:
-      'Hi! I can help you plan your home financing. To estimate your real cash to close, tell me the purchase price and how much you plan to put down.',
+      'How can I help you today?',
     goodbye:
       'Thanks for calling West Coast Capital Mortgage. A licensed broker will follow up. Goodbye.',
     fallback:
@@ -74,7 +86,7 @@ export const DISCLOSURES = {
     ai:
       'Меня зовут Эмма. Я ваш A I-помощник, а не лицензированный кредитный специалист. Все цифры — только оценка для планирования, и каждый сценарий проверяет лицензированный брокер.',
     greeting:
-      'Здравствуйте! Я помогу спланировать финансирование покупки жилья. Чтобы оценить сумму к закрытию, назовите цену покупки и сколько вы планируете внести первоначально.',
+      'Чем я могу помочь вам сегодня?',
     goodbye:
       'Спасибо, что позвонили в West Coast Capital Mortgage. Лицензированный брокер свяжется с вами. До свидания.',
     fallback: 'Извините, я не расслышал. Повторите, пожалуйста.',
@@ -85,7 +97,7 @@ export const DISCLOSURES = {
     ai:
       'Me llamo Emma. Soy su asistente de inteligencia artificial, no una oficial de préstamos con licencia. Todo es una estimación solo para planificación, y un corredor con licencia revisa cada escenario.',
     greeting:
-      'Hola! Puedo ayudarle a planificar el financiamiento de su vivienda. Para estimar el efectivo necesario para cerrar, dígame el precio de compra y cuánto planea dar de enganche.',
+      '¿Cómo puedo ayudarle hoy?',
     goodbye:
       'Gracias por llamar a West Coast Capital Mortgage. Un corredor con licencia le dará seguimiento. Adiós.',
     fallback: 'Disculpe, no entendí. Puede repetirlo?',
@@ -96,7 +108,7 @@ export const DISCLOSURES = {
     ai:
       '我叫 Emma，是您的人工智能助理，而非持牌贷款专员。所有数字仅为规划用途的估算，每个方案都会由持牌经纪人审核。',
     greeting:
-      '您好！我可以帮助您规划购房贷款。为了估算您的实际结算资金，请告诉我购买价格以及您计划支付的首付金额。',
+      '今天我能为您做些什么？',
     goodbye: '感谢致电 West Coast Capital Mortgage。持牌经纪人会与您联系。再见。',
     fallback: '抱歉，我没有听清，请再说一遍。',
   },
