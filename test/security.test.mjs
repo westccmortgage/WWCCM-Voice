@@ -8,6 +8,7 @@ import {
   verifyCallSession,
   verifyTwilioRequest,
 } from '../src/security.mjs';
+import { buildReadiness, canAcceptTraffic } from '../src/readiness.mjs';
 
 const TOKEN = 'test-auth-token';
 
@@ -63,4 +64,32 @@ test('start identity binds the signed session to both CallSid and StreamSid', ()
   assert.deepEqual(validateStartIdentity(msg, TOKEN, now + 1), { callSid, streamSid });
   msg.start.callSid = `CA${'f'.repeat(32)}`;
   assert.equal(validateStartIdentity(msg, TOKEN, now + 1), null);
+});
+
+test('liveness can remain healthy while readiness and traffic stay fail closed', () => {
+  const status = buildReadiness({ deepgram: {}, elevenlabs: {} });
+  assert.equal(status.ready, false);
+  assert.deepEqual(status.missing, [
+    'TWILIO_AUTH_TOKEN',
+    'VOICE_TURN_URL',
+    'VOICE_SHARED_SECRET',
+    'DEEPGRAM_API_KEY',
+    'ELEVENLABS_API_KEY',
+    'ELEVENLABS_VOICE_ID',
+  ]);
+  assert.equal(canAcceptTraffic({ deepgram: {}, elevenlabs: {} }), false);
+  assert.equal(verifyTwilioRequest({ headers: {}, body: {} }, ''), false);
+});
+
+test('whitespace-only configuration remains unready', () => {
+  const whitespace = {
+    twilioAuthToken: ' ',
+    voiceTurnUrl: '\t',
+    voiceSharedSecret: '\n',
+    deepgram: { apiKey: '  ' },
+    elevenlabs: { apiKey: '\r', voiceId: '   ' },
+  };
+  assert.equal(buildReadiness(whitespace).ready, false);
+  assert.equal(buildReadiness(whitespace).missing.length, 6);
+  assert.equal(canAcceptTraffic(whitespace), false);
 });
