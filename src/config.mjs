@@ -58,46 +58,46 @@ export const config = {
 export const DISCLOSURES = {
   en: {
     recording:
-      'This call may be recorded and processed by an automated assistant for quality and to help plan your mortgage scenario.',
+      "Hi, you've reached West Coast Capital Mortgage. This call may be recorded and processed by an automated assistant for quality and to help plan your mortgage scenario.",
     ai:
-      "You're speaking with Wallet W C C M's A I assistant — not a licensed loan officer. Everything is an estimate for planning only, and a licensed broker reviews every scenario.",
+      "My name is Emma. I'm your A I assistant, not a licensed loan officer. Everything is an estimate for planning only, and a licensed broker reviews every scenario.",
     greeting:
       'Hi! I can help you plan your home financing. To estimate your real cash to close, tell me the purchase price and how much you plan to put down.',
     goodbye:
-      'Thanks for calling Wallet W C C M. A licensed broker will follow up. Goodbye.',
+      'Thanks for calling West Coast Capital Mortgage. A licensed broker will follow up. Goodbye.',
     fallback:
       "Sorry, I didn't catch that. Could you say that again?",
   },
   ru: {
     recording:
-      'Этот звонок может записываться и обрабатываться автоматическим помощником для качества и для расчёта вашего сценария по ипотеке.',
+      'Спасибо, что позвонили в West Coast Capital Mortgage. Этот звонок может записываться и обрабатываться автоматическим помощником для качества и для расчёта вашего сценария по ипотеке.',
     ai:
-      'Вы говорите с A I-помощником Wallet W C C M — это не лицензированный кредитный специалист. Все цифры — только оценка для планирования, и каждый сценарий проверяет лицензированный брокер.',
+      'Меня зовут Эмма. Я ваш A I-помощник, а не лицензированный кредитный специалист. Все цифры — только оценка для планирования, и каждый сценарий проверяет лицензированный брокер.',
     greeting:
       'Здравствуйте! Я помогу спланировать финансирование покупки жилья. Чтобы оценить сумму к закрытию, назовите цену покупки и сколько вы планируете внести первоначально.',
     goodbye:
-      'Спасибо, что позвонили в Wallet W C C M. Лицензированный брокер свяжется с вами. До свидания.',
+      'Спасибо, что позвонили в West Coast Capital Mortgage. Лицензированный брокер свяжется с вами. До свидания.',
     fallback: 'Извините, я не расслышал. Повторите, пожалуйста.',
   },
   es: {
     recording:
-      'Esta llamada puede ser grabada y procesada por un asistente automatizado para calidad y para planificar su escenario hipotecario.',
+      'Gracias por llamar a West Coast Capital Mortgage. Esta llamada puede ser grabada y procesada por un asistente automatizado para calidad y para planificar su escenario hipotecario.',
     ai:
-      'Está hablando con el asistente de inteligencia artificial de Wallet W C C M, no con un oficial de préstamos con licencia. Todo es una estimación solo para planificación, y un corredor con licencia revisa cada escenario.',
+      'Me llamo Emma. Soy su asistente de inteligencia artificial, no una oficial de préstamos con licencia. Todo es una estimación solo para planificación, y un corredor con licencia revisa cada escenario.',
     greeting:
       'Hola! Puedo ayudarle a planificar el financiamiento de su vivienda. Para estimar el efectivo necesario para cerrar, dígame el precio de compra y cuánto planea dar de enganche.',
     goodbye:
-      'Gracias por llamar a Wallet W C C M. Un corredor con licencia le dará seguimiento. Adiós.',
+      'Gracias por llamar a West Coast Capital Mortgage. Un corredor con licencia le dará seguimiento. Adiós.',
     fallback: 'Disculpe, no entendí. Puede repetirlo?',
   },
   zh: {
     recording:
-      '为了服务质量和帮助规划您的贷款方案，本次通话可能会被录音并由自动助理处理。',
+      '感谢致电 West Coast Capital Mortgage。为了服务质量和帮助规划您的贷款方案，本次通话可能会被录音并由自动助理处理。',
     ai:
-      '您正在与 Wallet W C C M 的人工智能助理通话，而非持牌贷款专员。所有数字仅为规划用途的估算，每个方案都会由持牌经纪人审核。',
+      '我叫 Emma，是您的人工智能助理，而非持牌贷款专员。所有数字仅为规划用途的估算，每个方案都会由持牌经纪人审核。',
     greeting:
       '您好！我可以帮助您规划购房贷款。为了估算您的实际结算资金，请告诉我购买价格以及您计划支付的首付金额。',
-    goodbye: '感谢致电 Wallet W C C M。持牌经纪人会与您联系。再见。',
+    goodbye: '感谢致电 West Coast Capital Mortgage。持牌经纪人会与您联系。再见。',
     fallback: '抱歉，我没有听清，请再说一遍。',
   },
 };
