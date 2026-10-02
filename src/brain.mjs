@@ -23,15 +23,17 @@ const TIMEOUT_MS = 12_000;
  * @returns {Promise<{reply:string, profile:object, pendingField:string|null, numbers:object, readyForOptions:boolean, source:string}|null>}
  */
 export async function advisorTurn({ text, profile, pendingField, language, isFirst, history }) {
-  if (!config.voiceTurnUrl) {
-    console.error('[brain] VOICE_TURN_URL is not set');
+  if (!config.voiceTurnUrl || !config.voiceSharedSecret) {
+    console.error('[brain] VOICE_TURN_URL / VOICE_SHARED_SECRET not configured');
     return null;
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const headers = { 'content-type': 'application/json' };
-    if (config.voiceSharedSecret) headers['x-voice-secret'] = config.voiceSharedSecret;
+    const headers = {
+      'content-type': 'application/json',
+      'x-voice-secret': config.voiceSharedSecret,
+    };
     const resp = await fetch(config.voiceTurnUrl, {
       method: 'POST',
       headers,
@@ -43,7 +45,9 @@ export async function advisorTurn({ text, profile, pendingField, language, isFir
         language: language || 'en',
         isFirst: !!isFirst,
         historySummary: (history || []).slice(-6),
-        phrase: true,
+        // Regulated phone copy stays deterministic unless a separately reviewed
+        // validation layer is introduced for model-rephrased output.
+        phrase: false,
       }),
     });
     if (!resp.ok) {
@@ -51,7 +55,17 @@ export async function advisorTurn({ text, profile, pendingField, language, isFir
       console.error('[brain] non-OK', resp.status, detail.slice(0, 300));
       return null;
     }
-    return await resp.json();
+    const data = await resp.json();
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    if (typeof data.reply !== 'string' || !data.reply.trim() || data.reply.length > 2_000) return null;
+    if (data.profile != null && (typeof data.profile !== 'object' || Array.isArray(data.profile))) return null;
+    if (data.pendingField != null && typeof data.pendingField !== 'string') return null;
+    return {
+      ...data,
+      reply: data.reply.trim(),
+      profile: data.profile || {},
+      pendingField: data.pendingField ?? null,
+    };
   } catch (err) {
     console.error('[brain] request failed:', String(err).slice(0, 200));
     return null;

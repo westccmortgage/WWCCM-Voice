@@ -41,6 +41,6 @@ services:
       - key: ELEVENLABS_MODEL_ID
         value: eleven_turbo_v2_5
 
-      # --- optional: verify inbound Twilio requests ---
+      # --- required: fail-closed verification for HTTP and WebSocket traffic ---
       - key: TWILIO_AUTH_TOKEN
         sync: false

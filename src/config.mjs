@@ -29,7 +29,7 @@ export const config = {
     modelId: process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5',
   },
 
-  // Optional: validate the Twilio webhook signature when set.
+  // Required: all webhook and WebSocket traffic is rejected when absent.
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
 
   // Business facts spoken on request — never cross these numbers.

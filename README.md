@@ -50,11 +50,13 @@ See [`.env.example`](./.env.example). Secrets are set in the Render dashboard.
 | `AGENT_LANGUAGE` | `en` \| `ru` \| `es` \| `zh` |
 | `DEEPGRAM_API_KEY` / `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | Speech-to-text |
 | `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` / `ELEVENLABS_MODEL_ID` | Text-to-speech |
-| `TWILIO_AUTH_TOKEN` | Optional — enables Twilio signature verification on `/voice` |
+| `TWILIO_AUTH_TOKEN` | Required — verifies `/voice`, `/media`, and binds each media stream to its signed call |
 
 ### Which AI model speaks?
 
-That is decided **in the brain**, not here. On the Wallet WCCM site set:
+The production phone path uses deterministic engine copy by default. Optional AI
+rephrasing is disabled unless `VOICE_ALLOW_AI_PHRASING=true` is explicitly set on
+the Wallet WCCM site. If enabled, its provider is decided **in the brain**:
 
 - `WWCCM_MODEL` — model id (default `claude-haiku-4-5`; e.g. `claude-sonnet-5-5`).
 - `WWCCM_AI_PROVIDER` — `anthropic` (default, direct) or `cf-anthropic` /

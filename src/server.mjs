@@ -15,28 +15,55 @@
 // and text. No rates, approvals, or guarantees are ever spoken (enforced upstream).
 
 import http from 'node:http';
-import crypto from 'node:crypto';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { config, disclosuresFor } from './config.mjs';
 import { openDeepgram } from './deepgram.mjs';
 import { speak } from './elevenlabs.mjs';
 import { advisorTurn } from './brain.mjs';
+import { issueCallSession, validateStartIdentity, verifyTwilioRequest } from './security.mjs';
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'wwccm-voice' }));
-app.get('/', (_req, res) => res.type('text').send('WWCCM-Voice is running.'));
+function readiness() {
+  const missing = [];
+  if (!config.twilioAuthToken) missing.push('TWILIO_AUTH_TOKEN');
+  if (!config.voiceTurnUrl) missing.push('VOICE_TURN_URL');
+  if (!config.voiceSharedSecret) missing.push('VOICE_SHARED_SECRET');
+  if (!config.deepgram.apiKey) missing.push('DEEPGRAM_API_KEY');
+  if (!config.elevenlabs.apiKey) missing.push('ELEVENLABS_API_KEY');
+  if (!config.elevenlabs.voiceId) missing.push('ELEVENLABS_VOICE_ID');
+  return { ready: missing.length === 0, missing };
+}
+
+app.get('/health', (_req, res) => {
+  const status = readiness();
+  res.status(status.ready ? 200 : 503).json({ ok: status.ready, service: 'wwccm-voice', ...status });
+});
+app.get('/', (_req, res) => {
+  const status = readiness();
+  res.status(status.ready ? 200 : 503).json({ service: 'wwccm-voice', ...status });
+});
 
 // --- Twilio voice webhook: return TwiML that starts the media stream ---------
 app.post('/voice', (req, res) => {
-  if (!verifyTwilio(req)) {
+  if (!readiness().ready) {
+    console.error('[voice] required configuration is missing; rejecting request');
+    return res.status(503).send('Unavailable');
+  }
+  if (!verifyTwilioRequest(req, config.twilioAuthToken)) {
     console.warn('[voice] Twilio signature verification failed');
     return res.status(403).send('Forbidden');
   }
+  const callSid = String(req.body?.CallSid || '');
+  if (!/^CA[a-f0-9]{32}$/i.test(callSid)) return res.status(400).send('Bad Request');
   const host = req.headers['x-forwarded-host'] || req.headers.host;
+  if (!/^[a-z0-9.-]+(?::\d{1,5})?$/i.test(String(host || ''))) {
+    return res.status(400).send('Bad Request');
+  }
   const wsUrl = `wss://${host}/media`;
+  const session = issueCallSession(callSid, config.twilioAuthToken);
   const lang = config.language;
   const twiml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
@@ -44,6 +71,8 @@ app.post('/voice', (req, res) => {
     `<Connect>` +
     `<Stream url="${wsUrl}">` +
     `<Parameter name="lang" value="${lang}"/>` +
+    `<Parameter name="callSid" value="${callSid}"/>` +
+    `<Parameter name="session" value="${session}"/>` +
     `</Stream>` +
     `</Connect>` +
     `</Response>`;
@@ -51,7 +80,26 @@ app.post('/voice', (req, res) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/media' });
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (req, socket, head) => {
+  const reject = (status, reason) => {
+    socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
+    socket.destroy();
+  };
+  if (!config.twilioAuthToken) return reject(503, 'Service Unavailable');
+  let pathname;
+  try {
+    pathname = new URL(req.url || '/', 'https://invalid.local').pathname;
+  } catch {
+    return reject(400, 'Bad Request');
+  }
+  if (pathname !== '/media') return reject(404, 'Not Found');
+  if (!verifyTwilioRequest(req, config.twilioAuthToken, { websocket: true })) {
+    return reject(403, 'Forbidden');
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+});
 
 wss.on('connection', (ws) => {
   /** @type {CallState} */
@@ -69,6 +117,11 @@ wss.on('connection', (ws) => {
     processing: false,
     closeAfterMark: null,
     markSeq: 0,
+    disclosureComplete: false,
+    disclosureMark: null,
+    audioBytes: 0,
+    turnCount: 0,
+    callTimer: null,
   };
 
   ws.on('message', (raw) => {
@@ -83,7 +136,7 @@ wss.on('connection', (ws) => {
         onStart(ws, state, msg);
         break;
       case 'media':
-        onMedia(state, msg);
+        onMedia(ws, state, msg);
         break;
       case 'mark':
         onMark(ws, state, msg);
@@ -101,39 +154,62 @@ wss.on('connection', (ws) => {
 });
 
 function onStart(ws, state, msg) {
-  state.streamSid = msg.start?.streamSid || msg.streamSid;
-  state.callSid = msg.start?.callSid;
+  if (state.streamSid) return ws.close(1008, 'duplicate start');
+  const identity = validateStartIdentity(msg, config.twilioAuthToken);
+  if (!identity) {
+    console.warn('[media] rejected invalid call/session identity');
+    return ws.close(1008, 'invalid identity');
+  }
+  state.streamSid = identity.streamSid;
+  state.callSid = identity.callSid;
+  state.callTimer = setTimeout(() => {
+    console.warn('[media] maximum call duration reached');
+    cleanup(state);
+    ws.close(1000, 'call duration limit');
+  }, 30 * 60_000);
   const paramLang = msg.start?.customParameters?.lang;
   if (paramLang) state.language = paramLang;
 
-  // Open STT for the whole call.
+  // Speak the mandatory disclosures first. Caller audio is discarded and no
+  // speech-recognition provider is opened until Twilio confirms playback.
+  const d = disclosuresFor(state.language);
+  const intro = `${d.recording} ${d.ai} ${d.greeting}`;
+  say(ws, state, intro, 'intro');
+}
+
+function openSpeechRecognition(ws, state) {
+  if (state.dg || !state.disclosureComplete) return;
   state.dg = openDeepgram({
     onFinal: (text) => handleUtterance(ws, state, text),
     onInterim: (text) => {
-      // Barge-in: if the agent is talking and the caller says something real,
-      // stop the agent and flush buffered audio.
       if (state.speaking && text && text.length > 2) stopSpeaking(ws, state);
     },
     onError: (err) => console.error('[dg] error:', String(err).slice(0, 200)),
   });
-
-  // Speak the required disclosures, then the greeting, as the very first thing.
-  const d = disclosuresFor(state.language);
-  const intro = `${d.recording} ${d.ai} ${d.greeting}`;
-  say(ws, state, intro);
 }
 
-function onMedia(state, msg) {
+function onMedia(ws, state, msg) {
+  if (!state.disclosureComplete || !state.streamSid || msg.streamSid !== state.streamSid) return;
   const payload = msg.media?.payload;
   if (!payload || !state.dg) return;
-  state.dg.sendAudio(Buffer.from(payload, 'base64'));
+  const audio = Buffer.from(payload, 'base64');
+  state.audioBytes += audio.length;
+  if (state.audioBytes > 32 * 1024 * 1024) {
+    cleanup(state);
+    return ws.close(1009, 'audio limit');
+  }
+  state.dg.sendAudio(audio);
 }
 
 async function handleUtterance(ws, state, text) {
-  if (!text) return;
-  // Ignore a stray final that arrives while we're still speaking the intro.
+  if (!state.disclosureComplete || !text || text.length > 2_000) return;
   if (state.speaking) stopSpeaking(ws, state);
   if (state.processing) return; // one turn at a time
+  state.turnCount += 1;
+  if (state.turnCount > 60) {
+    cleanup(state);
+    return ws.close(1000, 'turn limit');
+  }
   state.processing = true;
 
   state.history.push({ role: 'user', text });
@@ -170,7 +246,7 @@ async function handleUtterance(ws, state, text) {
 }
 
 // --- Speaking (TTS → Twilio) -------------------------------------------------
-function say(ws, state, text) {
+function say(ws, state, text, mark = 'eos') {
   if (!text) return;
   state.speaking = true;
   const controller = new AbortController();
@@ -180,14 +256,19 @@ function say(ws, state, text) {
     signal: controller.signal,
     onChunk: (chunk) => sendAudio(ws, state, chunk),
   })
-    .catch(() => {})
+    .then(() => {
+      const sent = sendMark(ws, state, mark);
+      if (mark === 'intro') state.disclosureMark = sent;
+    })
+    .catch((err) => {
+      console.error('[tts] failed:', String(err).slice(0, 200));
+      if (mark === 'intro') ws.close(1011, 'disclosure unavailable');
+    })
     .finally(() => {
       if (state.ttsAbort === controller) {
         state.speaking = false;
         state.ttsAbort = null;
       }
-      // A mark lets us know when THIS utterance finished playing out.
-      sendMark(ws, state, 'eos');
     });
 }
 
@@ -228,7 +309,13 @@ function sendMark(ws, state, name) {
 }
 
 function onMark(ws, state, msg) {
+  if (!state.streamSid || msg.streamSid !== state.streamSid) return;
   const name = msg.mark?.name;
+  if (name && state.disclosureMark && name === state.disclosureMark) {
+    state.disclosureComplete = true;
+    state.disclosureMark = null;
+    openSpeechRecognition(ws, state);
+  }
   if (name && state.closeAfterMark && name === state.closeAfterMark) {
     try {
       ws.close();
@@ -255,6 +342,8 @@ function stopSpeaking(ws, state) {
 }
 
 function cleanup(state) {
+  if (state.callTimer) clearTimeout(state.callTimer);
+  state.callTimer = null;
   try {
     state.ttsAbort?.abort();
   } catch {
@@ -274,29 +363,6 @@ function isGoodbye(text) {
   return GOODBYE.test(text.trim());
 }
 
-/** Validate Twilio's X-Twilio-Signature (only when TWILIO_AUTH_TOKEN is set). */
-function verifyTwilio(req) {
-  if (!config.twilioAuthToken) return true; // validation disabled
-  const signature = req.headers['x-twilio-signature'];
-  if (!signature) return false;
-  const proto = req.headers['x-forwarded-proto'] || 'https';
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  const url = `${proto}://${host}${req.originalUrl}`;
-  const params = req.body || {};
-  const data = Object.keys(params)
-    .sort()
-    .reduce((acc, key) => acc + key + params[key], url);
-  const expected = crypto
-    .createHmac('sha1', config.twilioAuthToken)
-    .update(Buffer.from(data, 'utf-8'))
-    .digest('base64');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-  } catch {
-    return false;
-  }
-}
-
 /**
  * @typedef {Object} CallState
  * @property {string|null} streamSid
@@ -312,6 +378,11 @@ function verifyTwilio(req) {
  * @property {boolean} processing
  * @property {string|null} closeAfterMark
  * @property {number} markSeq
+ * @property {boolean} disclosureComplete
+ * @property {string|null} disclosureMark
+ * @property {number} audioBytes
+ * @property {number} turnCount
+ * @property {ReturnType<typeof setTimeout>|null} callTimer
  */
 
 server.listen(config.port, () => {
@@ -319,4 +390,6 @@ server.listen(config.port, () => {
   if (!config.voiceTurnUrl) console.warn('[wwccm-voice] WARNING: VOICE_TURN_URL not set — the brain is unreachable.');
   if (!config.deepgram.apiKey) console.warn('[wwccm-voice] WARNING: DEEPGRAM_API_KEY not set.');
   if (!config.elevenlabs.apiKey) console.warn('[wwccm-voice] WARNING: ELEVENLABS_API_KEY not set.');
+  if (!config.twilioAuthToken) console.warn('[wwccm-voice] LOCKED: TWILIO_AUTH_TOKEN not set; voice and media endpoints reject all traffic.');
+  if (!config.voiceSharedSecret) console.warn('[wwccm-voice] LOCKED: VOICE_SHARED_SECRET not set; brain requests are disabled.');
 });

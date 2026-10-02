@@ -16,10 +16,9 @@ import { config } from './config.mjs';
  * @returns {Promise<void>}
  */
 export async function speak({ text, onChunk, signal }) {
-  if (!text || !text.trim()) return;
+  if (!text || !text.trim()) throw new Error('TTS text is empty');
   if (!config.elevenlabs.apiKey || !config.elevenlabs.voiceId) {
-    console.error('[tts] ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID not set');
-    return;
+    throw new Error('ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID not set');
   }
 
   const url =
@@ -43,22 +42,24 @@ export async function speak({ text, onChunk, signal }) {
       }),
     });
   } catch (err) {
-    if (err?.name !== 'AbortError') console.error('[tts] request failed:', String(err).slice(0, 200));
-    return;
+    throw err;
   }
 
   if (!resp.ok || !resp.body) {
     const detail = await resp.text().catch(() => '');
-    console.error('[tts] non-OK', resp.status, detail.slice(0, 300));
-    return;
+    throw new Error(`ElevenLabs HTTP ${resp.status}: ${detail.slice(0, 300)}`);
   }
 
+  let receivedBytes = 0;
   try {
     for await (const chunk of resp.body) {
-      if (signal?.aborted) break;
-      onChunk(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError');
+      const audio = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      receivedBytes += audio.length;
+      onChunk(audio);
     }
   } catch (err) {
-    if (err?.name !== 'AbortError') console.error('[tts] stream error:', String(err).slice(0, 200));
+    throw err;
   }
+  if (receivedBytes === 0) throw new Error('ElevenLabs returned no audio');
 }
