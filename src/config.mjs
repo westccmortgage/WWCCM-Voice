@@ -58,11 +58,11 @@ export const config = {
 export const DISCLOSURES = {
   en: {
     recording:
-      "Hi, you've reached West Coast Capital Mortgage. This call may be recorded and processed by an automated assistant for quality and to help plan your mortgage scenario.",
+      "Hi, you've reached West Coast Capital Mortgage. This call may be recorded for quality.",
     ai:
-      "My name is Emma. I'm your A I assistant, not a licensed loan officer. Everything is an estimate for planning only, and a licensed broker reviews every scenario.",
+      "My name is Emma. I'm your A I assistant, not a licensed loan officer. Any figures are planning estimates, and a licensed broker reviews every scenario.",
     greeting:
-      'Hi! I can help you plan your home financing. To estimate your real cash to close, tell me the purchase price and how much you plan to put down.',
+      'How can I help you today?',
     goodbye:
       'Thanks for calling West Coast Capital Mortgage. A licensed broker will follow up. Goodbye.',
     fallback:

@@ -14,7 +14,7 @@ test('every locale uses the full company name and removes the old spoken initial
 test('every locale retains Emma, AI, recording, non-licensed, and estimate/review disclosures', () => {
   const requiredCopy = {
     en: {
-      recording: ['may be recorded', 'automated assistant'],
+      recording: ['may be recorded', 'for quality'],
       ai: ['Emma', 'A I assistant', 'not a licensed loan officer', 'estimate', 'licensed broker reviews'],
     },
     ru: {
@@ -53,4 +53,6 @@ test('English introduction identifies the company once before Emma and the AI di
   );
   assert.match(intro, /not a licensed loan officer/);
   assert.match(intro, /may be recorded/);
+  assert.ok(intro.endsWith('How can I help you today?'));
+  assert.doesNotMatch(intro, /purchase price|put down/i);
 });
