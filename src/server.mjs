@@ -360,7 +360,12 @@ async function processUtterance(ws, state, turn) {
     state.pendingField = result.pendingField ?? null;
     reply = result.reply;
   } else {
-    reply = disclosuresFor(state.language).fallback;
+    // The remote turn may have committed even when its response was lost. Do
+    // not issue a new request with a guessed revision or continue a split-
+    // brain call. End this CallSid; a new call starts a new durable session.
+    beginEnding(state);
+    sayThenHangup(ws, state, disclosuresFor(state.language).unavailable);
+    return true;
   }
   const historyIndex = appendAssistantHistory(
     state, reply, result?.coreStateRevision ?? revision, result?.source ?? null,

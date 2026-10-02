@@ -79,6 +79,8 @@ export const DISCLOSURES = {
       'Thanks for calling West Coast Capital Mortgage. A licensed broker will follow up. Goodbye.',
     fallback:
       "Sorry, I didn't catch that. Could you say that again?",
+    unavailable:
+      "Sorry, I can't safely continue this call right now. Please call West Coast Capital Mortgage again shortly. Goodbye.",
   },
   ru: {
     recording:
@@ -90,6 +92,7 @@ export const DISCLOSURES = {
     goodbye:
       'Спасибо, что позвонили в West Coast Capital Mortgage. Лицензированный брокер свяжется с вами. До свидания.',
     fallback: 'Извините, я не расслышал. Повторите, пожалуйста.',
+    unavailable: 'Извините, сейчас я не могу безопасно продолжить этот звонок. Пожалуйста, перезвоните в West Coast Capital Mortgage немного позже. До свидания.',
   },
   es: {
     recording:
@@ -101,6 +104,7 @@ export const DISCLOSURES = {
     goodbye:
       'Gracias por llamar a West Coast Capital Mortgage. Un corredor con licencia le dará seguimiento. Adiós.',
     fallback: 'Disculpe, no entendí. Puede repetirlo?',
+    unavailable: 'Lo siento, no puedo continuar esta llamada de forma segura en este momento. Por favor, vuelva a llamar a West Coast Capital Mortgage en unos minutos. Adiós.',
   },
   zh: {
     recording:
@@ -111,6 +115,7 @@ export const DISCLOSURES = {
       '今天我能为您做些什么？',
     goodbye: '感谢致电 West Coast Capital Mortgage。持牌经纪人会与您联系。再见。',
     fallback: '抱歉，我没有听清，请再说一遍。',
+    unavailable: '抱歉，我现在无法安全地继续本次通话。请稍后再次致电 West Coast Capital Mortgage。再见。',
   },
 };
 

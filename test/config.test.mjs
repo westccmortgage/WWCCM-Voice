@@ -64,3 +64,11 @@ test('every locale opens with goal discovery rather than purchase fields', () =>
     assert.match(disclosure.greeting, /help|помочь|ayudarle|做些什么/i, language);
   }
 });
+
+test('every locale has a terminal fail-closed message for an ambiguous Core result', () => {
+  for (const [language, disclosure] of Object.entries(DISCLOSURES)) {
+    assert.ok(disclosure.unavailable.length > 30, language);
+    assert.match(disclosure.unavailable, /West Coast Capital Mortgage/, language);
+    assert.match(disclosure.unavailable, /Goodbye|До свидания|Adiós|再见/i, language);
+  }
+});
