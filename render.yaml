@@ -1,0 +1,46 @@
+# Render Blueprint for WWCCM-Voice.
+#
+# A Web Service (public URL + persistent WebSocket) is required — Twilio must
+# reach POST /voice and open a Media Stream WebSocket to /media. Use an ALWAYS-ON
+# plan (starter), NOT free: a free instance sleeps and wakes in 30–50s, which is
+# fatal for a phone call. Secrets are set in the Render dashboard (sync: false).
+
+services:
+  - type: web
+    name: wwccm-voice
+    runtime: node
+    plan: starter            # always-on; do NOT use "free" for telephony
+    region: oregon
+    branch: main
+    buildCommand: npm install
+    startCommand: node src/server.mjs
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # --- the advisor brain (Wallet WCCM site) ---
+      - key: VOICE_TURN_URL
+        sync: false          # e.g. https://wwccm.com/api/voice-advisor-turn
+      - key: VOICE_SHARED_SECRET
+        sync: false          # must match the same var on the Netlify site
+      - key: AGENT_LANGUAGE
+        value: en            # en | ru | es | zh
+
+      # --- speech to text (Deepgram) ---
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: DEEPGRAM_MODEL
+        value: nova-2
+      - key: DEEPGRAM_LANGUAGE
+        value: en
+
+      # --- text to speech (ElevenLabs) ---
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: ELEVENLABS_MODEL_ID
+        value: eleven_turbo_v2_5
+
+      # --- optional: verify inbound Twilio requests ---
+      - key: TWILIO_AUTH_TOKEN
+        sync: false

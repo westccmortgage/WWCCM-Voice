@@ -1,0 +1,19 @@
+{
+  "name": "wwccm-voice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WWCCM-Voice — phone agent for Wallet WCCM. Twilio Media Streams <-> Deepgram STT <-> advisor brain <-> ElevenLabs TTS.",
+  "type": "module",
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}
