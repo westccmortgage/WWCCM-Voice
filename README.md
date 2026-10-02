@@ -45,12 +45,14 @@ See [`.env.example`](./.env.example). Secrets are set in the Render dashboard.
 
 | Var | What |
 | --- | --- |
+| `VOICE_RUNTIME_ENABLED` | Master activation gate; must remain `false` until all release and budget gates pass |
 | `VOICE_TURN_URL` | Brain endpoint: `https://walletwccm.com/api/voice-advisor-turn` |
 | `VOICE_SHARED_SECRET` | Must equal `VOICE_SHARED_SECRET` on the Netlify site |
 | `AGENT_LANGUAGE` | `en` \| `ru` \| `es` \| `zh` |
 | `DEEPGRAM_API_KEY` / `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | Speech-to-text |
 | `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` / `ELEVENLABS_MODEL_ID` | Text-to-speech |
 | `TWILIO_AUTH_TOKEN` | Required — verifies `/voice`, `/media`, and binds each media stream to its signed call |
+| `MAX_CALL_SECONDS` / `MAX_CONVERSATION_TURNS` / `MAX_TTS_CHARACTERS` | Hard per-call provider-usage ceilings, checked before provider work |
 
 ### Local-only Cloudflare speech adapter
 
@@ -77,11 +79,13 @@ credits are valid.
 
 ### Which AI model speaks?
 
-The production phone path uses deterministic engine copy by default. Optional AI
-rephrasing is disabled unless `VOICE_ALLOW_AI_PHRASING=true` is explicitly set on
-the Wallet WCCM site. If enabled, its provider is decided **in the brain**:
+The legacy production phone path uses deterministic engine copy by default. The
+new conversational Core path is dormant unless `CORE_V2_VOICE_ENABLED=true` is
+explicitly set on the Wallet WCCM site after its service credential, durable
+state, provider policy, and spend limits are installed. Core owns its model
+allowlist and price snapshot; Render never receives that credential.
 
-- `WWCCM_MODEL` — model id (default `claude-haiku-4-5`; e.g. `claude-sonnet-5-5`).
+- `WWCCM_MODEL` — legacy phrasing model id only.
 - `WWCCM_AI_PROVIDER` — `anthropic` (default, direct) or `cf-anthropic` /
   `cf-openai` / `cf-google` to route through the **Measured Decision V2**
   Cloudflare AI Gateway (`CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_AI_GATEWAY_ID` /
@@ -125,6 +129,9 @@ request host automatically.
 - The agent presents **estimates only**, defers to a **licensed broker**, and
   never states a rate, approval, or guarantee — enforced in the brain.
 - Never ask for SSN, full account numbers, or date of birth on the call.
+- Keep the conversational runtime disabled until both the provider budget and
+  production usage ceilings are approved. For one bounded acceptance call, set
+  120 seconds, six turns, and 8,000 synthesized characters before enabling it.
 
 ## Files
 

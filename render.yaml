@@ -17,6 +17,8 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      - key: VOICE_RUNTIME_ENABLED
+        value: false         # explicit activation gate
       # --- the advisor brain (Wallet WCCM site) ---
       - key: VOICE_TURN_URL
         sync: false          # https://walletwccm.com/api/voice-advisor-turn
@@ -44,3 +46,11 @@ services:
       # --- required: fail-closed verification for HTTP and WebSocket traffic ---
       - key: TWILIO_AUTH_TOKEN
         sync: false
+
+      # --- hard per-call usage ceilings (tighten for acceptance) ---
+      - key: MAX_CALL_SECONDS
+        value: 1800
+      - key: MAX_CONVERSATION_TURNS
+        value: 60
+      - key: MAX_TTS_CHARACTERS
+        value: 25000

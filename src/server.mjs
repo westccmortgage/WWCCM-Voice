@@ -23,6 +23,23 @@ import { advisorTurn } from './brain.mjs';
 import { issueCallSession, validateStartIdentity, verifyTwilioRequest } from './security.mjs';
 import { buildReadiness, canAcceptTraffic } from './readiness.mjs';
 import { beginBrainRequest, endCall, finishBrainRequest } from './call-lifecycle.mjs';
+import { reserveSpeechCharacters } from './usage-limits.mjs';
+import {
+  appendAssistantHistory,
+  beginEnding,
+  bindAssistantMark,
+  bindAssistantPlayback,
+  canAcceptCallerInput,
+  classifyConversationControl,
+  conversationControlReply,
+  isTurnSuperseded,
+  isDuplicateFinal,
+  markActiveAssistantInterrupted,
+  markAssistantDelivered,
+  markAssistantUndelivered,
+  queueUtterance,
+  takeNextUtterance,
+} from './conversation-control.mjs';
 import {
   acknowledgePlaybackMark,
   beginPlayback,
@@ -135,14 +152,24 @@ wss.on('connection', (ws) => {
     activePlaybackGeneration: null,
     playbackMark: null,
     processing: false,
+    paused: false,
+    utteranceQueue: [],
+    turnRevision: 0,
+    coreStateRevision: 0,
+    activeAssistantHistoryIndex: null,
+    assistantMarkHistory: new Map(),
     closeAfterMark: null,
     markSeq: 0,
     disclosureComplete: false,
     disclosureMark: null,
     audioBytes: 0,
+    ttsCharacters: 0,
     turnCount: 0,
     callTimer: null,
     ended: false,
+    ending: false,
+    lastFinalText: null,
+    lastFinalAt: null,
     brainAbort: null,
   };
 
@@ -188,7 +215,7 @@ function onStart(ws, state, msg) {
     console.warn('[media] maximum call duration reached');
     cleanup(state);
     ws.close(1000, 'call duration limit');
-  }, 30 * 60_000);
+  }, config.limits.maxCallSeconds * 1_000);
   const paramLang = msg.start?.customParameters?.lang;
   if (paramLang) state.language = paramLang;
 
@@ -203,17 +230,17 @@ function openSpeechRecognition(ws, state) {
   if (state.ended || state.dg || !state.disclosureComplete) return;
   state.dg = openTranscription({
     onFinal: (text) => {
-      if (!state.ended) handleUtterance(ws, state, text);
+      if (canAcceptCallerInput(state)) enqueueUtterance(ws, state, text);
     },
     onInterim: (text) => {
-      if (!state.ended && state.speaking && text && text.length > 2) stopSpeaking(ws, state);
+      if (canAcceptCallerInput(state) && state.speaking && text && text.length > 2) stopSpeaking(ws, state);
     },
     onError: (err) => console.error('[dg] error:', String(err).slice(0, 200)),
   });
 }
 
 function onMedia(ws, state, msg) {
-  if (!state.disclosureComplete || !state.streamSid || msg.streamSid !== state.streamSid) return;
+  if (!canAcceptCallerInput(state) || !state.disclosureComplete || !state.streamSid || msg.streamSid !== state.streamSid) return;
   const payload = msg.media?.payload;
   if (!payload || !state.dg) return;
   const audio = Buffer.from(payload, 'base64');
@@ -225,32 +252,79 @@ function onMedia(ws, state, msg) {
   state.dg.sendAudio(audio);
 }
 
-async function handleUtterance(ws, state, text) {
-  if (state.ended || !state.disclosureComplete || !text || text.length > 2_000) return;
+function enqueueUtterance(ws, state, text) {
+  if (!canAcceptCallerInput(state) || !state.disclosureComplete || !text || text.length > 2_000) return;
+  if (isDuplicateFinal(state, text)) return;
+  const control = classifyConversationControl(text);
+  const goodbye = isGoodbye(text);
+  // Clear the current response once, then make ending terminal before this
+  // utterance can await brain cancellation or farewell synthesis. Later STT,
+  // media, and barge-in callbacks cannot cancel the requested hangup.
   if (state.speaking) stopSpeaking(ws, state);
-  if (state.processing) return; // one turn at a time
+  if (goodbye) beginEnding(state);
+  queueUtterance(state, text, 4, {
+    intent: goodbye ? 'goodbye' : control,
+    priority: goodbye || Boolean(control),
+  });
+  if (state.processing) {
+    // Do not abort a durable Core turn after dispatch: the remote side may
+    // commit even if the HTTP client disconnects. Let it finish, advance the
+    // authoritative revision, and discard only its superseded speech.
+    return;
+  }
+  void drainUtterances(ws, state);
+}
+
+async function drainUtterances(ws, state) {
+  if (state.processing || state.ended) return;
+  state.processing = true;
+  try {
+    while (!state.ended && state.utteranceQueue.length) {
+      const turn = takeNextUtterance(state, { controlsOnly: state.paused });
+      if (!turn) break;
+      const responseStarted = await processUtterance(ws, state, turn);
+      // Never start another response while this one is still being synthesized
+      // or buffered by Twilio. A mark/failure/new barge-in resumes draining.
+      if (responseStarted) break;
+    }
+  } finally {
+    state.processing = false;
+  }
+}
+
+async function processUtterance(ws, state, turn) {
+  const { text, revision, intent: queuedIntent } = turn;
   state.turnCount += 1;
-  if (state.turnCount > 60) {
+  if (state.turnCount > config.limits.maxTurns) {
     cleanup(state);
     return ws.close(1000, 'turn limit');
   }
-  state.processing = true;
 
-  state.history.push({ role: 'user', text });
+  state.history.push({ role: 'user', text, turnRevision: revision });
 
   // Simple, language-agnostic goodbye handling.
   if (isGoodbye(text)) {
     const d = disclosuresFor(state.language);
     sayThenHangup(ws, state, d.goodbye);
-    state.processing = false;
-    return;
+    return true;
+  }
+
+  const control = queuedIntent || classifyConversationControl(text);
+  if (control) {
+    // Hearing/resume replies are disposable if a newer caller turn is already
+    // waiting. Pause and goodbye are priority human controls and are never
+    // silently superseded.
+    if (control === 'hearing_check' && isTurnSuperseded(state, revision)) return false;
+    if (control === 'pause') state.paused = true;
+    if (control === 'resume') state.paused = false;
+    const reply = conversationControlReply(state.language, control);
+    const historyIndex = appendAssistantHistory(state, reply, revision);
+    say(ws, state, reply, 'eos', historyIndex);
+    return true;
   }
 
   const brainController = beginBrainRequest(state);
-  if (!brainController) {
-    state.processing = false;
-    return;
-  }
+  if (!brainController) return false;
   const result = await advisorTurn({
     text,
     profile: state.profile,
@@ -258,29 +332,68 @@ async function handleUtterance(ws, state, text) {
     language: state.language,
     isFirst: state.isFirst,
     history: state.history,
+    callIdentity: state.callSid,
+    turnId: `${state.callSid}:${revision}`,
+    expectedStateRevision: state.coreStateRevision,
     signal: brainController.signal,
   });
-  if (!finishBrainRequest(state, brainController)) return;
+  if (!finishBrainRequest(state, brainController)) return false;
   state.isFirst = false;
 
   let reply;
   if (result && result.reply) {
+    if (result.source === 'core-v2-voice'
+      && Number.isInteger(result.coreStateRevision)
+      && result.coreStateRevision === state.coreStateRevision + 1) {
+      state.coreStateRevision = result.coreStateRevision;
+    }
+    // Persist delivery truth for a committed Core answer that was superseded
+    // before playback, while still advancing the authoritative Core revision.
+    if (isTurnSuperseded(state, revision)) {
+      const staleIndex = appendAssistantHistory(
+        state, result.reply, result.coreStateRevision, result.source,
+      );
+      markAssistantUndelivered(state, staleIndex, 'interrupted');
+      return false;
+    }
     state.profile = result.profile || state.profile;
     state.pendingField = result.pendingField ?? null;
     reply = result.reply;
   } else {
-    reply = disclosuresFor(state.language).fallback;
+    // The remote turn may have committed even when its response was lost. Do
+    // not issue a new request with a guessed revision or continue a split-
+    // brain call. End this CallSid; a new call starts a new durable session.
+    beginEnding(state);
+    sayThenHangup(ws, state, disclosuresFor(state.language).unavailable);
+    return true;
   }
-  state.history.push({ role: 'assistant', text: reply });
-  state.processing = false;
-  say(ws, state, reply);
+  const historyIndex = appendAssistantHistory(
+    state, reply, result?.coreStateRevision ?? revision, result?.source ?? null,
+  );
+  if (result?.disposition === 'pause') state.paused = true;
+  if (result?.disposition === 'resume') state.paused = false;
+  if (result?.disposition === 'end' || result?.disposition === 'human_handoff') {
+    beginEnding(state);
+    sayThenHangup(ws, state, reply, historyIndex);
+    return true;
+  }
+  say(ws, state, reply, 'eos', historyIndex);
+  return true;
 }
 
 // --- Speaking (TTS → Twilio) -------------------------------------------------
-function say(ws, state, text, mark = 'eos') {
+function say(ws, state, text, mark = 'eos', historyIndex = null) {
   if (state.ended || !text) return;
+  if (!reserveSpeechCharacters(state, text, config.limits.maxTtsCharacters)) {
+    console.warn('[tts] per-call character limit reached');
+    cleanup(state);
+    ws.close(1009, 'speech limit');
+    return;
+  }
+  if (state.speaking) stopSpeaking(ws, state);
   const controller = new AbortController();
   const generation = beginPlayback(state, controller);
+  if (historyIndex != null) bindAssistantPlayback(state, historyIndex, generation);
   synthesizeSpeech({
     text,
     signal: controller.signal,
@@ -291,21 +404,35 @@ function say(ws, state, text, mark = 'eos') {
     .then(() => {
       if (state.activePlaybackGeneration !== generation) return;
       const sent = sendMark(ws, state, mark);
-      if (!finishPlaybackGeneration(state, generation, sent)) return;
+      if (!finishPlaybackGeneration(state, generation, sent)) {
+        if (historyIndex != null) markAssistantUndelivered(state, historyIndex);
+        void drainUtterances(ws, state);
+        return;
+      }
+      if (historyIndex != null) bindAssistantMark(state, historyIndex, sent);
       if (mark === 'intro') state.disclosureMark = sent;
     })
     .catch((err) => {
       if (failPlaybackGeneration(state, generation)) {
+        if (historyIndex != null) markAssistantUndelivered(state, historyIndex);
         console.error('[tts] failed:', String(err).slice(0, 200));
         if (mark === 'intro') ws.close(1011, 'disclosure unavailable');
+        else void drainUtterances(ws, state);
       }
     });
 }
 
-function sayThenHangup(ws, state, text) {
+function sayThenHangup(ws, state, text, historyIndex = null) {
   if (state.ended || !text) return;
+  if (!reserveSpeechCharacters(state, text, config.limits.maxTtsCharacters)) {
+    console.warn('[tts] per-call character limit reached');
+    cleanup(state);
+    ws.close(1009, 'speech limit');
+    return;
+  }
   const controller = new AbortController();
   const generation = beginPlayback(state, controller);
+  if (historyIndex != null) bindAssistantPlayback(state, historyIndex, generation);
   synthesizeSpeech({
     text,
     signal: controller.signal,
@@ -317,12 +444,14 @@ function sayThenHangup(ws, state, text) {
       if (state.activePlaybackGeneration !== generation) return;
       const sent = sendMark(ws, state, 'bye');
       if (finishPlaybackGeneration(state, generation, sent)) {
+        if (historyIndex != null) bindAssistantMark(state, historyIndex, sent);
         // Close the stream once this final audio has actually played out.
         state.closeAfterMark = sent;
       }
     })
     .catch(() => {
       if (failPlaybackGeneration(state, generation)) {
+        if (historyIndex != null) markAssistantUndelivered(state, historyIndex);
         try {
           ws.close(1011, 'goodbye unavailable');
         } catch {
@@ -358,6 +487,7 @@ function onMark(ws, state, msg) {
   if (!state.streamSid || msg.streamSid !== state.streamSid) return;
   const name = msg.mark?.name;
   const completedPlayback = acknowledgePlaybackMark(state, name);
+  if (completedPlayback) markAssistantDelivered(state, name);
   if (name && state.disclosureMark && name === state.disclosureMark) {
     state.disclosureComplete = true;
     state.disclosureMark = null;
@@ -370,10 +500,18 @@ function onMark(ws, state, msg) {
     } catch {
       /* ignore */
     }
+    return;
   }
+  // Even while paused, drainUtterances can select a queued human control
+  // (not ordinary speech), including the resume that releases the pause.
+  if (completedPlayback && !state.ended) void drainUtterances(ws, state);
 }
 
 function stopSpeaking(ws, state) {
+  // Twilio sends pending marks after a clear, even for discarded audio. Mark
+  // the dialogue turn interrupted before clearing so a late mark cannot be
+  // mistaken for proof that the caller heard the response.
+  markActiveAssistantInterrupted(state);
   const controller = invalidatePlayback(state);
   if (controller) {
     try {
@@ -398,6 +536,7 @@ function cleanup(state) {
   }
   if (state.callTimer) clearTimeout(state.callTimer);
   state.callTimer = null;
+  markActiveAssistantInterrupted(state);
   const controller = invalidatePlayback(state);
   state.closeAfterMark = null;
   state.disclosureMark = null;
@@ -436,14 +575,24 @@ function isGoodbye(text) {
  * @property {number|null} activePlaybackGeneration
  * @property {string|null} playbackMark
  * @property {boolean} processing
+ * @property {boolean} paused
+ * @property {{text:string,revision:number}[]} utteranceQueue
+ * @property {number} turnRevision
+ * @property {number} coreStateRevision
+ * @property {number|null} activeAssistantHistoryIndex
+ * @property {Map<string,number>} assistantMarkHistory
  * @property {string|null} closeAfterMark
  * @property {number} markSeq
  * @property {boolean} disclosureComplete
  * @property {string|null} disclosureMark
  * @property {number} audioBytes
+ * @property {number} ttsCharacters
  * @property {number} turnCount
  * @property {ReturnType<typeof setTimeout>|null} callTimer
  * @property {boolean} ended
+ * @property {boolean} ending
+ * @property {string|null} lastFinalText
+ * @property {number|null} lastFinalAt
  * @property {AbortController|null} brainAbort
  */
 

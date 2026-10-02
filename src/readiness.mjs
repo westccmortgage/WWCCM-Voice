@@ -1,6 +1,7 @@
 export function buildReadiness(config) {
   const missing = [];
   const present = (value) => typeof value === 'string' && value.trim().length > 0;
+  if (config.runtimeEnabled !== true) missing.push('VOICE_RUNTIME_ENABLED');
   if (!present(config.twilioAuthToken)) missing.push('TWILIO_AUTH_TOKEN');
   if (!present(config.voiceTurnUrl)) missing.push('VOICE_TURN_URL');
   if (!present(config.voiceSharedSecret)) missing.push('VOICE_SHARED_SECRET');

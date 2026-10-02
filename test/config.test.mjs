@@ -14,7 +14,7 @@ test('every locale uses the full company name and removes the old spoken initial
 test('every locale retains Emma, AI, recording, non-licensed, and estimate/review disclosures', () => {
   const requiredCopy = {
     en: {
-      recording: ['may be recorded', 'automated assistant'],
+      recording: ['may be recorded', 'for quality'],
       ai: ['Emma', 'A I assistant', 'not a licensed loan officer', 'estimate', 'licensed broker reviews'],
     },
     ru: {
@@ -53,4 +53,22 @@ test('English introduction identifies the company once before Emma and the AI di
   );
   assert.match(intro, /not a licensed loan officer/);
   assert.match(intro, /may be recorded/);
+  assert.ok(intro.endsWith('How can I help you today?'));
+  assert.doesNotMatch(intro, /purchase price|put down/i);
+});
+
+test('every locale opens with goal discovery rather than purchase fields', () => {
+  const forbidden = /purchase price|down payment|цена покупки|первоначальн\w+ взнос|precio de compra|enganche|购买价格|首付/i;
+  for (const [language, disclosure] of Object.entries(DISCLOSURES)) {
+    assert.doesNotMatch(disclosure.greeting, forbidden, language);
+    assert.match(disclosure.greeting, /help|помочь|ayudarle|做些什么/i, language);
+  }
+});
+
+test('every locale has a terminal fail-closed message for an ambiguous Core result', () => {
+  for (const [language, disclosure] of Object.entries(DISCLOSURES)) {
+    assert.ok(disclosure.unavailable.length > 30, language);
+    assert.match(disclosure.unavailable, /West Coast Capital Mortgage/, language);
+    assert.match(disclosure.unavailable, /Goodbye|До свидания|Adiós|再见/i, language);
+  }
 });

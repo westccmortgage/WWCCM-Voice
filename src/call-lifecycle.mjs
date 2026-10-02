@@ -6,8 +6,20 @@ export function beginBrainRequest(state) {
 }
 
 export function finishBrainRequest(state, controller) {
-  if (state.brainAbort === controller) state.brainAbort = null;
+  if (state.brainAbort !== controller) return false;
+  state.brainAbort = null;
   return !state.ended;
+}
+
+export function cancelBrainRequest(state) {
+  const controller = state.brainAbort;
+  state.brainAbort = null;
+  try {
+    controller?.abort();
+  } catch {
+    /* ignore */
+  }
+  return controller;
 }
 
 export function endCall(state) {
