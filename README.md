@@ -46,6 +46,9 @@ See [`.env.example`](./.env.example). Secrets are set in the Render dashboard.
 | Var | What |
 | --- | --- |
 | `VOICE_RUNTIME_ENABLED` | Master activation gate; must remain `false` until all release and budget gates pass |
+| `VOICE_ADMISSION_MODE` | Independent `disabled` / bounded-owner-`test` gate; production remains fail-closed pending a separately reviewed policy |
+| `VOICE_TEST_ALLOWED_CALLER` | Exact owner E.164 caller allowed in `test` mode |
+| `VOICE_ADMISSION_URL` | Durable Netlify admission endpoint; it reaches the Core PostgreSQL transaction boundary without exposing Core credentials to Render |
 | `VOICE_TURN_URL` | Brain endpoint: `https://walletwccm.com/api/voice-advisor-turn` |
 | `VOICE_SHARED_SECRET` | Must equal `VOICE_SHARED_SECRET` on the Netlify site |
 | `AGENT_LANGUAGE` | `en` \| `ru` \| `es` \| `zh` |
@@ -130,8 +133,13 @@ request host automatically.
   never states a rate, approval, or guarantee — enforced in the brain.
 - Never ask for SSN, full account numbers, or date of birth on the call.
 - Keep the conversational runtime disabled until both the provider budget and
-  production usage ceilings are approved. For one bounded acceptance call, set
-  120 seconds, six turns, and 8,000 synthesized characters before enabling it.
+  production usage ceilings are approved. A bounded acceptance call also
+  requires `VOICE_ADMISSION_MODE=test`, the owner's exact caller number, and
+  separately approved call, webhook, Core-request, duration, turn, token, TTS,
+  and one-time dollar caps. Those suite limits live in the immutable Core
+  admission/budget policies. A Twilio webhook retry reuses its original answer
+  time, and exactly one media stream can claim the lease, so a restart cannot
+  reset local speech or turn counters.
 
 ## Files
 
