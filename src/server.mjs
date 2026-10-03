@@ -21,7 +21,7 @@ import { config, disclosuresFor } from './config.mjs';
 import { openTranscription, synthesizeSpeech } from './speech.mjs';
 import { advisorTurn } from './brain.mjs';
 import { issueCallSession, validateStartIdentity, verifyTwilioRequest } from './security.mjs';
-import { buildReadiness, canAcceptTraffic } from './readiness.mjs';
+import { buildServiceStatus, canAcceptTraffic } from './readiness.mjs';
 import { beginBrainRequest, endCall, finishBrainRequest } from './call-lifecycle.mjs';
 import { reserveSpeechCharacters } from './usage-limits.mjs';
 import { createCallAdmission } from './admission.mjs';
@@ -54,28 +54,15 @@ app.use(express.urlencoded({ extended: false }));
 const admission = createCallAdmission(config.admission);
 
 function readiness() {
-  return buildReadiness(config);
+  return buildServiceStatus(config);
 }
 
 app.get('/health', (_req, res) => {
-  const status = readiness();
-  res.json({
-    ok: true,
-    service: 'wwccm-voice',
-    configured: status.ready,
-    ready: status.ready,
-    missing: status.missing,
-  });
+  res.json(buildServiceStatus(config, { liveness: true }));
 });
 app.get('/ready', (_req, res) => {
   const status = readiness();
-  res.status(status.ready ? 200 : 503).json({
-    ok: status.ready,
-    service: 'wwccm-voice',
-    configured: status.ready,
-    ready: status.ready,
-    missing: status.missing,
-  });
+  res.status(status.ready ? 200 : 503).json(status);
 });
 app.get('/', (_req, res) => {
   const status = readiness();
