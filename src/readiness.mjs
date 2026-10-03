@@ -8,10 +8,12 @@ export function buildReadiness(config) {
   const admission = config.admission || {};
   if (admission.mode === 'test') {
     if (!/^\+[1-9]\d{7,14}$/.test(admission.allowedCaller || '')) missing.push('VOICE_TEST_ALLOWED_CALLER');
-    if (!Number.isInteger(admission.maxCalls) || admission.maxCalls < 1) missing.push('VOICE_TEST_MAX_CALLS');
-    if (!Number.isInteger(admission.maxVoiceWebhooks) || admission.maxVoiceWebhooks < 1) missing.push('VOICE_TEST_MAX_VOICE_WEBHOOKS');
-    if (!Number.isInteger(admission.maxBrainRequests) || admission.maxBrainRequests < 1) missing.push('VOICE_TEST_MAX_BRAIN_REQUESTS');
-  } else if (admission.mode !== 'production') {
+    if (!present(admission.url)) missing.push('VOICE_ADMISSION_URL');
+    else try {
+      const url = new URL(admission.url);
+      if (url.href !== 'https://walletwccm.com/api/voice-admission') missing.push('VOICE_ADMISSION_URL');
+    } catch { missing.push('VOICE_ADMISSION_URL'); }
+  } else {
     missing.push('VOICE_ADMISSION_MODE');
   }
   const provider = config.speech?.provider || 'legacy';

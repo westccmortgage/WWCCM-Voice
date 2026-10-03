@@ -4,34 +4,50 @@ import test from 'node:test';
 import { createCallAdmission } from '../src/admission.mjs';
 
 const OWNER = '+14245550123';
-const CALL_A = `CA${'a'.repeat(32)}`;
-const CALL_B = `CA${'b'.repeat(32)}`;
+const CALL = `CA${'a'.repeat(32)}`;
+const SETTINGS = { mode: 'test', allowedCaller: OWNER,
+  url: 'https://walletwccm.com/api/voice-admission', sharedSecret: 'fixture-secret' };
 
-test('test admission permits only the exact owner and a bounded single call', () => {
-  const admission = createCallAdmission({
-    mode: 'test', allowedCaller: OWNER, maxCalls: 1, maxVoiceWebhooks: 2, maxBrainRequests: 2,
-  });
-  assert.equal(admission.admitVoiceWebhook({ callSid: CALL_A, from: '+14245550999' }), null);
-  assert.deepEqual(admission.admitVoiceWebhook({ callSid: CALL_A, from: OWNER, now: 100 }), { answeredAt: 100 });
-  assert.deepEqual(admission.admitVoiceWebhook({ callSid: CALL_A, from: OWNER, now: 999 }),
-    { answeredAt: 100 }, 'a Twilio retry cannot reset the answer-time deadline');
-  assert.equal(admission.admitVoiceWebhook({ callSid: CALL_A, from: OWNER }), null, 'suite webhook cap');
-  assert.equal(admission.admitVoiceWebhook({ callSid: CALL_B, from: OWNER }), null, 'suite call cap');
+const lease = { protocol: 'core-v2.voice-admission.1', suiteId: 'owner-call-1',
+  callIdentityDigest: 'a'.repeat(64), answeredAtMs: Date.now() - 100,
+  deadlineMs: Date.now() + 120_000, maximumTurns: 6, maximumBrainRequests: 12,
+  maximumTtsCharacters: 8000, repeated: false };
+
+test('admission sends only a bounded owner call to the durable boundary', async () => {
+  const fetchImpl = async (_url, init) => {
+    assert.equal(init.redirect, 'error');
+    assert.equal(init.headers['x-voice-secret'], SETTINGS.sharedSecret);
+    assert.deepEqual(JSON.parse(init.body), { action: 'admit', callIdentity: CALL, caller: OWNER });
+    return new Response(JSON.stringify(lease));
+  };
+  const admission = createCallAdmission(SETTINGS, { fetchImpl });
+  assert.equal(await admission.admitVoiceWebhook({ callSid: CALL, from: '+14245550999' }), null);
+  assert.deepEqual(await admission.admitVoiceWebhook({ callSid: CALL, from: OWNER }), { ...lease, caller: OWNER });
 });
 
-test('test admission bounds total Core requests across the suite', () => {
-  const admission = createCallAdmission({
-    mode: 'test', allowedCaller: OWNER, maxCalls: 1, maxVoiceWebhooks: 1, maxBrainRequests: 2,
-  });
-  assert.equal(admission.reserveBrainRequest(CALL_A), false, 'call must first be admitted');
-  assert.ok(admission.admitVoiceWebhook({ callSid: CALL_A, from: OWNER }));
-  assert.equal(admission.reserveBrainRequest(CALL_A), true);
-  assert.equal(admission.reserveBrainRequest(CALL_A), true);
-  assert.equal(admission.reserveBrainRequest(CALL_A), false);
-  assert.deepEqual(admission.snapshot(), { calls: 1, voiceWebhooks: 1, brainRequests: 2 });
+test('stream activation is a separate one-shot durable claim', async () => {
+  const fetchImpl = async (_url, init) => {
+    assert.deepEqual(JSON.parse(init.body), {
+      action: 'claim_stream', callIdentity: CALL, caller: OWNER, suiteId: lease.suiteId,
+    });
+    return new Response(JSON.stringify({ protocol: 'core-v2.voice-admission-stream.1',
+      suiteId: lease.suiteId, callIdentityDigest: 'a'.repeat(64), claimed: true }));
+  };
+  const admission = createCallAdmission(SETTINGS, { fetchImpl });
+  assert.equal(await admission.claimStream({ callSid: CALL, caller: OWNER, suiteId: lease.suiteId }), true);
 });
 
-test('disabled admission rejects all calls', () => {
-  assert.equal(createCallAdmission({ mode: 'disabled' })
-    .admitVoiceWebhook({ callSid: CALL_A, from: OWNER }), null);
+test('disabled, malformed, insecure, and ambiguous admission fails closed without retry', async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; throw new Error('unknown outcome'); };
+  assert.equal(await createCallAdmission({ mode: 'disabled' }, { fetchImpl })
+    .admitVoiceWebhook({ callSid: CALL, from: OWNER }), null);
+  assert.equal(calls, 0);
+  await assert.rejects(createCallAdmission(SETTINGS, { fetchImpl })
+    .admitVoiceWebhook({ callSid: CALL, from: OWNER }), /unknown outcome/);
+  assert.equal(calls, 1, 'unknown outcomes are never blindly retried');
+  await assert.rejects(createCallAdmission({ ...SETTINGS, url: 'http://walletwccm.com/api/voice-admission' }, { fetchImpl })
+    .admitVoiceWebhook({ callSid: CALL, from: OWNER }), /admission_insecure_url/);
+  await assert.rejects(createCallAdmission({ ...SETTINGS, url: 'https://attacker.test/api/voice-admission' }, { fetchImpl })
+    .admitVoiceWebhook({ callSid: CALL, from: OWNER }), /admission_insecure_url/);
 });

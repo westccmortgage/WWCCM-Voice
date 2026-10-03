@@ -55,10 +55,9 @@ export const config = {
   // bounds the complete suite across webhook and Core requests.
   admission: {
     mode: (process.env.VOICE_ADMISSION_MODE || 'disabled').toLowerCase(),
+    url: process.env.VOICE_ADMISSION_URL || '',
+    sharedSecret: process.env.VOICE_SHARED_SECRET || '',
     allowedCaller: process.env.VOICE_TEST_ALLOWED_CALLER || '',
-    maxCalls: boundedInteger(process.env.VOICE_TEST_MAX_CALLS, 0, { min: 1, max: 10 }),
-    maxVoiceWebhooks: boundedInteger(process.env.VOICE_TEST_MAX_VOICE_WEBHOOKS, 0, { min: 1, max: 20 }),
-    maxBrainRequests: boundedInteger(process.env.VOICE_TEST_MAX_BRAIN_REQUESTS, 0, { min: 1, max: 100 }),
   },
 
   // Hard provider-usage ceilings. For a bounded acceptance call these can be

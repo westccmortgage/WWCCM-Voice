@@ -83,7 +83,7 @@ app.get('/', (_req, res) => {
 });
 
 // --- Twilio voice webhook: return TwiML that starts the media stream ---------
-app.post('/voice', (req, res) => {
+app.post('/voice', async (req, res) => {
   if (!canAcceptTraffic(config)) {
     console.error('[voice] required configuration is missing; rejecting request');
     return res.status(503).send('Unavailable');
@@ -98,16 +98,27 @@ app.post('/voice', (req, res) => {
   if (!/^[a-z0-9.-]+(?::\d{1,5})?$/i.test(String(host || ''))) {
     return res.status(400).send('Bad Request');
   }
-  const admitted = admission.admitVoiceWebhook({ callSid, from: String(req.body?.From || '') });
+  let admitted;
+  try {
+    admitted = await admission.admitVoiceWebhook({ callSid, from: String(req.body?.From || '') });
+  } catch {
+    console.error('[voice] durable admission outcome unavailable; failing closed');
+    return res.status(503).send('Unavailable');
+  }
   if (!admitted) {
     console.warn('[voice] call refused by release admission policy');
     return res.status(403).send('Forbidden');
   }
   const wsUrl = `wss://${host}/media`;
-  const answeredAt = admitted.answeredAt;
-  const session = issueCallSession(
-    callSid, config.twilioAuthToken, answeredAt, config.limits.maxCallSeconds * 1_000,
-  );
+  const answeredAt = admitted.answeredAtMs;
+  const deadline = Math.min(admitted.deadlineMs, answeredAt + config.limits.maxCallSeconds * 1_000);
+  const session = issueCallSession(callSid, config.twilioAuthToken, {
+    answeredAt, deadline, suiteId: admitted.suiteId, caller: admitted.caller,
+    maximumTurns: Math.min(admitted.maximumTurns, config.limits.maxTurns),
+    maximumBrainRequests: admitted.maximumBrainRequests,
+    maximumTtsCharacters: Math.min(admitted.maximumTtsCharacters, config.limits.maxTtsCharacters),
+  });
+  if (!session) return res.status(503).send('Unavailable');
   const lang = config.language;
   const twiml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
@@ -181,6 +192,10 @@ wss.on('connection', (ws) => {
     lastFinalText: null,
     lastFinalAt: null,
     brainAbort: null,
+    brainRequests: 0,
+    maximumTurns: 0,
+    maximumBrainRequests: 0,
+    maximumTtsCharacters: 0,
   };
 
   ws.on('message', (raw) => {
@@ -192,7 +207,7 @@ wss.on('connection', (ws) => {
     }
     switch (msg.event) {
       case 'start':
-        onStart(ws, state, msg);
+        void onStart(ws, state, msg);
         break;
       case 'media':
         onMedia(ws, state, msg);
@@ -212,15 +227,23 @@ wss.on('connection', (ws) => {
   ws.on('error', () => cleanup(state));
 });
 
-function onStart(ws, state, msg) {
+async function onStart(ws, state, msg) {
   if (state.streamSid) return ws.close(1008, 'duplicate start');
   const identity = validateStartIdentity(msg, config.twilioAuthToken);
   if (!identity) {
     console.warn('[media] rejected invalid call/session identity');
     return ws.close(1008, 'invalid identity');
   }
+  let claimed = false;
+  try {
+    claimed = await admission.claimStream({ callSid: identity.callSid, caller: identity.caller, suiteId: identity.suiteId });
+  } catch { /* an ambiguous claim must never be retried */ }
+  if (!claimed || state.streamSid || state.ended) return ws.close(1008, 'admission unavailable');
   state.streamSid = identity.streamSid;
   state.callSid = identity.callSid;
+  state.maximumTurns = identity.maximumTurns;
+  state.maximumBrainRequests = identity.maximumBrainRequests;
+  state.maximumTtsCharacters = identity.maximumTtsCharacters;
   const remainingCallMs = identity.deadline - Date.now();
   if (remainingCallMs <= 0) return ws.close(1008, 'call duration limit');
   state.callTimer = setTimeout(() => {
@@ -307,7 +330,7 @@ async function drainUtterances(ws, state) {
 async function processUtterance(ws, state, turn) {
   const { text, revision, intent: queuedIntent } = turn;
   state.turnCount += 1;
-  if (state.turnCount > config.limits.maxTurns) {
+  if (state.turnCount > state.maximumTurns) {
     cleanup(state);
     return ws.close(1000, 'turn limit');
   }
@@ -337,12 +360,13 @@ async function processUtterance(ws, state, turn) {
 
   const brainController = beginBrainRequest(state);
   if (!brainController) return false;
-  if (!admission.reserveBrainRequest(state.callSid)) {
+  if (state.brainRequests >= state.maximumBrainRequests) {
     finishBrainRequest(state, brainController);
     beginEnding(state);
     sayThenHangup(ws, state, disclosuresFor(state.language).unavailable);
     return true;
   }
+  state.brainRequests += 1;
   const result = await advisorTurn({
     text,
     profile: state.profile,
@@ -402,7 +426,7 @@ async function processUtterance(ws, state, turn) {
 // --- Speaking (TTS → Twilio) -------------------------------------------------
 function say(ws, state, text, mark = 'eos', historyIndex = null) {
   if (state.ended || !text) return;
-  if (!reserveSpeechCharacters(state, text, config.limits.maxTtsCharacters)) {
+  if (!reserveSpeechCharacters(state, text, state.maximumTtsCharacters)) {
     console.warn('[tts] per-call character limit reached');
     cleanup(state);
     ws.close(1009, 'speech limit');
@@ -442,7 +466,7 @@ function say(ws, state, text, mark = 'eos', historyIndex = null) {
 
 function sayThenHangup(ws, state, text, historyIndex = null) {
   if (state.ended || !text) return;
-  if (!reserveSpeechCharacters(state, text, config.limits.maxTtsCharacters)) {
+  if (!reserveSpeechCharacters(state, text, state.maximumTtsCharacters)) {
     console.warn('[tts] per-call character limit reached');
     cleanup(state);
     ws.close(1009, 'speech limit');
@@ -612,6 +636,10 @@ function isGoodbye(text) {
  * @property {string|null} lastFinalText
  * @property {number|null} lastFinalAt
  * @property {AbortController|null} brainAbort
+ * @property {number} brainRequests
+ * @property {number} maximumTurns
+ * @property {number} maximumBrainRequests
+ * @property {number} maximumTtsCharacters
  */
 
 server.listen(config.port, () => {

@@ -1,7 +1,5 @@
 import crypto from 'node:crypto';
 
-const SESSION_TTL_MS = 5 * 60_000;
-
 export function safeEqual(a, b) {
   const left = Buffer.from(String(a || ''), 'utf8');
   const right = Buffer.from(String(b || ''), 'utf8');
@@ -34,12 +32,19 @@ export function verifyTwilioRequest(req, authToken, { websocket = false } = {}) 
   );
 }
 
-export function issueCallSession(callSid, authToken, now = Date.now(), maximumCallMs = SESSION_TTL_MS) {
+export function issueCallSession(callSid, authToken, lease) {
   if (!callSid || !authToken) return '';
-  if (!Number.isInteger(maximumCallMs) || maximumCallMs < 1) return '';
+  if (!lease || !Number.isSafeInteger(lease.answeredAt) || !Number.isSafeInteger(lease.deadline)
+    || lease.deadline <= lease.answeredAt || !/^[A-Za-z0-9_.:-]{1,80}$/.test(lease.suiteId || '')
+    || !/^\+[1-9][0-9]{7,14}$/.test(lease.caller || '')
+    || !Number.isInteger(lease.maximumTurns) || !Number.isInteger(lease.maximumBrainRequests)
+    || !Number.isInteger(lease.maximumTtsCharacters)) return '';
   const payload = Buffer.from(
-    JSON.stringify({ callSid, exp: now + maximumCallMs, answeredAt: now,
-      deadline: now + maximumCallMs, nonce: crypto.randomBytes(16).toString('hex') }),
+    JSON.stringify({ callSid, exp: lease.deadline, answeredAt: lease.answeredAt,
+      deadline: lease.deadline, suiteId: lease.suiteId, caller: lease.caller,
+      maximumTurns: lease.maximumTurns, maximumBrainRequests: lease.maximumBrainRequests,
+      maximumTtsCharacters: lease.maximumTtsCharacters,
+      nonce: crypto.randomBytes(16).toString('hex') }),
   ).toString('base64url');
   const mac = crypto.createHmac('sha256', authToken).update(payload).digest('base64url');
   return `${payload}.${mac}`;
@@ -56,6 +61,11 @@ function callSessionClaims(token, expectedCallSid, authToken, now = Date.now()) 
     return data.callSid === expectedCallSid && Number.isFinite(data.exp) && data.exp >= now
       && Number.isFinite(data.answeredAt) && Number.isFinite(data.deadline)
       && data.answeredAt <= now && data.deadline === data.exp
+      && /^[A-Za-z0-9_.:-]{1,80}$/.test(data.suiteId || '')
+      && /^\+[1-9][0-9]{7,14}$/.test(data.caller || '')
+      && Number.isInteger(data.maximumTurns) && data.maximumTurns >= 1 && data.maximumTurns <= 60
+      && Number.isInteger(data.maximumBrainRequests) && data.maximumBrainRequests >= 1 && data.maximumBrainRequests <= 100
+      && Number.isInteger(data.maximumTtsCharacters) && data.maximumTtsCharacters >= 500 && data.maximumTtsCharacters <= 100000
       ? data : null;
   } catch {
     return null;
@@ -75,5 +85,8 @@ export function validateStartIdentity(msg, authToken, now = Date.now()) {
     /^MZ[a-f0-9]{32}$/i.test(streamSid) &&
     /^CA[a-f0-9]{32}$/i.test(callSid) &&
     params.callSid === callSid && claims;
-  return valid ? { streamSid, callSid, answeredAt: claims.answeredAt, deadline: claims.deadline } : null;
+  return valid ? { streamSid, callSid, answeredAt: claims.answeredAt, deadline: claims.deadline,
+    suiteId: claims.suiteId, caller: claims.caller, maximumTurns: claims.maximumTurns,
+    maximumBrainRequests: claims.maximumBrainRequests,
+    maximumTtsCharacters: claims.maximumTtsCharacters } : null;
 }
