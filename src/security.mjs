@@ -34,16 +34,18 @@ export function verifyTwilioRequest(req, authToken, { websocket = false } = {}) 
   );
 }
 
-export function issueCallSession(callSid, authToken, now = Date.now()) {
+export function issueCallSession(callSid, authToken, now = Date.now(), maximumCallMs = SESSION_TTL_MS) {
   if (!callSid || !authToken) return '';
+  if (!Number.isInteger(maximumCallMs) || maximumCallMs < 1) return '';
   const payload = Buffer.from(
-    JSON.stringify({ callSid, exp: now + SESSION_TTL_MS, nonce: crypto.randomBytes(16).toString('hex') }),
+    JSON.stringify({ callSid, exp: now + maximumCallMs, answeredAt: now,
+      deadline: now + maximumCallMs, nonce: crypto.randomBytes(16).toString('hex') }),
   ).toString('base64url');
   const mac = crypto.createHmac('sha256', authToken).update(payload).digest('base64url');
   return `${payload}.${mac}`;
 }
 
-export function verifyCallSession(token, expectedCallSid, authToken, now = Date.now()) {
+function callSessionClaims(token, expectedCallSid, authToken, now = Date.now()) {
   if (!token || !expectedCallSid || !authToken) return false;
   const [payload, providedMac, extra] = String(token).split('.');
   if (!payload || !providedMac || extra) return false;
@@ -51,20 +53,27 @@ export function verifyCallSession(token, expectedCallSid, authToken, now = Date.
   if (!safeEqual(providedMac, expectedMac)) return false;
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return data.callSid === expectedCallSid && Number.isFinite(data.exp) && data.exp >= now;
+    return data.callSid === expectedCallSid && Number.isFinite(data.exp) && data.exp >= now
+      && Number.isFinite(data.answeredAt) && Number.isFinite(data.deadline)
+      && data.answeredAt <= now && data.deadline === data.exp
+      ? data : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function verifyCallSession(token, expectedCallSid, authToken, now = Date.now()) {
+  return Boolean(callSessionClaims(token, expectedCallSid, authToken, now));
 }
 
 export function validateStartIdentity(msg, authToken, now = Date.now()) {
   const streamSid = String(msg?.start?.streamSid || msg?.streamSid || '');
   const callSid = String(msg?.start?.callSid || '');
   const params = msg?.start?.customParameters || {};
+  const claims = callSessionClaims(params.session, callSid, authToken, now);
   const valid =
     /^MZ[a-f0-9]{32}$/i.test(streamSid) &&
     /^CA[a-f0-9]{32}$/i.test(callSid) &&
-    params.callSid === callSid &&
-    verifyCallSession(params.session, callSid, authToken, now);
-  return valid ? { streamSid, callSid } : null;
+    params.callSid === callSid && claims;
+  return valid ? { streamSid, callSid, answeredAt: claims.answeredAt, deadline: claims.deadline } : null;
 }

@@ -61,7 +61,9 @@ test('start identity binds the signed session to both CallSid and StreamSid', ()
     event: 'start',
     start: { streamSid, callSid, customParameters: { callSid, session } },
   };
-  assert.deepEqual(validateStartIdentity(msg, TOKEN, now + 1), { callSid, streamSid });
+  assert.deepEqual(validateStartIdentity(msg, TOKEN, now + 1), {
+    callSid, streamSid, answeredAt: now, deadline: now + 5 * 60_000,
+  });
   msg.start.callSid = `CA${'f'.repeat(32)}`;
   assert.equal(validateStartIdentity(msg, TOKEN, now + 1), null);
 });
@@ -74,6 +76,7 @@ test('liveness can remain healthy while readiness and traffic stay fail closed',
     'TWILIO_AUTH_TOKEN',
     'VOICE_TURN_URL',
     'VOICE_SHARED_SECRET',
+    'VOICE_ADMISSION_MODE',
     'DEEPGRAM_API_KEY',
     'ELEVENLABS_API_KEY',
     'ELEVENLABS_VOICE_ID',
@@ -91,7 +94,7 @@ test('whitespace-only configuration remains unready', () => {
     elevenlabs: { apiKey: '\r', voiceId: '   ' },
   };
   assert.equal(buildReadiness(whitespace).ready, false);
-  assert.equal(buildReadiness(whitespace).missing.length, 7);
+  assert.equal(buildReadiness(whitespace).missing.length, 8);
   assert.equal(canAcceptTraffic(whitespace), false);
 });
 
@@ -101,6 +104,7 @@ test('Cloudflare speech readiness needs gateway coordinates and token, not separ
     twilioAuthToken: 'twilio',
     voiceTurnUrl: 'https://walletwccm.com/api/voice-advisor-turn',
     voiceSharedSecret: 'shared',
+    admission: { mode: 'production' },
     speech: { provider: 'cloudflare-workers-ai', cloudflare: {} },
     deepgram: {},
     elevenlabs: {},
@@ -126,8 +130,36 @@ test('unknown speech provider fails closed', () => {
     twilioAuthToken: 'twilio',
     voiceTurnUrl: 'url',
     voiceSharedSecret: 'shared',
+    admission: { mode: 'production' },
     speech: { provider: 'unknown' },
   });
   assert.equal(status.ready, false);
   assert.deepEqual(status.missing, ['SPEECH_PROVIDER']);
+});
+
+test('test admission is unready without exact owner and suite ceilings', () => {
+  const base = {
+    runtimeEnabled: true,
+    twilioAuthToken: 'twilio',
+    voiceTurnUrl: 'https://walletwccm.com/api/voice-advisor-turn',
+    voiceSharedSecret: 'shared',
+    admission: { mode: 'test', allowedCaller: '', maxCalls: 0, maxVoiceWebhooks: 0, maxBrainRequests: 0 },
+    speech: { provider: 'cloudflare-workers-ai', cloudflare: {
+      accountId: 'account', gatewayId: 'gateway', gatewayToken: 'token',
+    } },
+  };
+  assert.deepEqual(buildReadiness(base).missing, [
+    'VOICE_TEST_ALLOWED_CALLER', 'VOICE_TEST_MAX_CALLS',
+    'VOICE_TEST_MAX_VOICE_WEBHOOKS', 'VOICE_TEST_MAX_BRAIN_REQUESTS',
+  ]);
+});
+
+test('call session deadline is anchored when Twilio answers, not when media starts', () => {
+  const now = 2_000_000;
+  const callSid = `CA${'1'.repeat(32)}`;
+  const streamSid = `MZ${'2'.repeat(32)}`;
+  const session = issueCallSession(callSid, TOKEN, now, 120_000);
+  const msg = { event: 'start', start: { streamSid, callSid, customParameters: { callSid, session } } };
+  assert.equal(validateStartIdentity(msg, TOKEN, now + 119_999)?.deadline, now + 120_000);
+  assert.equal(validateStartIdentity(msg, TOKEN, now + 120_001), null);
 });

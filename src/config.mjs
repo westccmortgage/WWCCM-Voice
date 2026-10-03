@@ -50,6 +50,17 @@ export const config = {
   // Required: all webhook and WebSocket traffic is rejected when absent.
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
 
+  // A test release is a separate admission mode, not merely an enabled
+  // public phone number. It admits only the owner's exact E.164 caller and
+  // bounds the complete suite across webhook and Core requests.
+  admission: {
+    mode: (process.env.VOICE_ADMISSION_MODE || 'disabled').toLowerCase(),
+    allowedCaller: process.env.VOICE_TEST_ALLOWED_CALLER || '',
+    maxCalls: boundedInteger(process.env.VOICE_TEST_MAX_CALLS, 0, { min: 1, max: 10 }),
+    maxVoiceWebhooks: boundedInteger(process.env.VOICE_TEST_MAX_VOICE_WEBHOOKS, 0, { min: 1, max: 20 }),
+    maxBrainRequests: boundedInteger(process.env.VOICE_TEST_MAX_BRAIN_REQUESTS, 0, { min: 1, max: 100 }),
+  },
+
   // Hard provider-usage ceilings. For a bounded acceptance call these can be
   // tightened without changing code (for example 120 seconds / 6 turns / 8000
   // synthesized characters). Invalid values fall back to the reviewed limits.

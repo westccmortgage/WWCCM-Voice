@@ -19,6 +19,16 @@ services:
     envVars:
       - key: VOICE_RUNTIME_ENABLED
         value: false         # explicit activation gate
+      - key: VOICE_ADMISSION_MODE
+        value: disabled      # test/production require separate release approval
+      - key: VOICE_TEST_ALLOWED_CALLER
+        sync: false          # exact owner E.164 only for an approved test
+      - key: VOICE_TEST_MAX_CALLS
+        sync: false
+      - key: VOICE_TEST_MAX_VOICE_WEBHOOKS
+        sync: false
+      - key: VOICE_TEST_MAX_BRAIN_REQUESTS
+        sync: false
       # --- the advisor brain (Wallet WCCM site) ---
       - key: VOICE_TURN_URL
         sync: false          # https://walletwccm.com/api/voice-advisor-turn

@@ -24,6 +24,7 @@ import { issueCallSession, validateStartIdentity, verifyTwilioRequest } from './
 import { buildReadiness, canAcceptTraffic } from './readiness.mjs';
 import { beginBrainRequest, endCall, finishBrainRequest } from './call-lifecycle.mjs';
 import { reserveSpeechCharacters } from './usage-limits.mjs';
+import { createCallAdmission } from './admission.mjs';
 import {
   appendAssistantHistory,
   beginEnding,
@@ -50,6 +51,7 @@ import {
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
+const admission = createCallAdmission(config.admission);
 
 function readiness() {
   return buildReadiness(config);
@@ -96,8 +98,16 @@ app.post('/voice', (req, res) => {
   if (!/^[a-z0-9.-]+(?::\d{1,5})?$/i.test(String(host || ''))) {
     return res.status(400).send('Bad Request');
   }
+  const admitted = admission.admitVoiceWebhook({ callSid, from: String(req.body?.From || '') });
+  if (!admitted) {
+    console.warn('[voice] call refused by release admission policy');
+    return res.status(403).send('Forbidden');
+  }
   const wsUrl = `wss://${host}/media`;
-  const session = issueCallSession(callSid, config.twilioAuthToken);
+  const answeredAt = admitted.answeredAt;
+  const session = issueCallSession(
+    callSid, config.twilioAuthToken, answeredAt, config.limits.maxCallSeconds * 1_000,
+  );
   const lang = config.language;
   const twiml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
@@ -211,11 +221,13 @@ function onStart(ws, state, msg) {
   }
   state.streamSid = identity.streamSid;
   state.callSid = identity.callSid;
+  const remainingCallMs = identity.deadline - Date.now();
+  if (remainingCallMs <= 0) return ws.close(1008, 'call duration limit');
   state.callTimer = setTimeout(() => {
     console.warn('[media] maximum call duration reached');
     cleanup(state);
     ws.close(1000, 'call duration limit');
-  }, config.limits.maxCallSeconds * 1_000);
+  }, remainingCallMs);
   const paramLang = msg.start?.customParameters?.lang;
   if (paramLang) state.language = paramLang;
 
@@ -325,6 +337,12 @@ async function processUtterance(ws, state, turn) {
 
   const brainController = beginBrainRequest(state);
   if (!brainController) return false;
+  if (!admission.reserveBrainRequest(state.callSid)) {
+    finishBrainRequest(state, brainController);
+    beginEnding(state);
+    sayThenHangup(ws, state, disclosuresFor(state.language).unavailable);
+    return true;
+  }
   const result = await advisorTurn({
     text,
     profile: state.profile,
