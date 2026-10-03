@@ -8,7 +8,12 @@ import {
   verifyCallSession,
   verifyTwilioRequest,
 } from '../src/security.mjs';
-import { buildReadiness, canAcceptTraffic } from '../src/readiness.mjs';
+import {
+  buildReadiness,
+  buildServiceStatus,
+  buildSpeechDiagnostic,
+  canAcceptTraffic,
+} from '../src/readiness.mjs';
 
 const TOKEN = 'test-auth-token';
 const lease = (now, duration = 5 * 60_000) => ({
@@ -86,6 +91,8 @@ test('liveness can remain healthy while readiness and traffic stay fail closed',
     'DEEPGRAM_API_KEY',
     'ELEVENLABS_API_KEY',
     'ELEVENLABS_VOICE_ID',
+    'DEEPGRAM_MODEL',
+    'ELEVENLABS_MODEL_ID',
   ]);
   assert.equal(canAcceptTraffic({ deepgram: {}, elevenlabs: {} }), false);
   assert.equal(verifyTwilioRequest({ headers: {}, body: {} }, ''), false);
@@ -100,7 +107,7 @@ test('whitespace-only configuration remains unready', () => {
     elevenlabs: { apiKey: '\r', voiceId: '   ' },
   };
   assert.equal(buildReadiness(whitespace).ready, false);
-  assert.equal(buildReadiness(whitespace).missing.length, 8);
+  assert.equal(buildReadiness(whitespace).missing.length, 10);
   assert.equal(canAcceptTraffic(whitespace), false);
 });
 
@@ -111,7 +118,9 @@ test('Cloudflare speech readiness needs gateway coordinates and token, not separ
     voiceTurnUrl: 'https://walletwccm.com/api/voice-advisor-turn',
     voiceSharedSecret: 'shared',
     admission: { mode: 'test', allowedCaller: '+14245550123', url: 'https://walletwccm.com/api/voice-admission' },
-    speech: { provider: 'cloudflare-workers-ai', cloudflare: {} },
+    speech: { provider: 'cloudflare-workers-ai', cloudflare: {
+      sttModel: '@cf/deepgram/nova-3', ttsModel: '@cf/deepgram/aura-1',
+    } },
     deepgram: {},
     elevenlabs: {},
   };
@@ -124,7 +133,10 @@ test('Cloudflare speech readiness needs gateway coordinates and token, not separ
     ...base,
     speech: {
       provider: 'cloudflare-workers-ai',
-      cloudflare: { accountId: 'account', gatewayId: 'gateway', gatewayToken: 'token' },
+      cloudflare: {
+        accountId: 'account', gatewayId: 'gateway', gatewayToken: 'token',
+        sttModel: '@cf/deepgram/nova-3', ttsModel: '@cf/deepgram/aura-1',
+      },
     },
   };
   assert.deepEqual(buildReadiness(configured), { ready: true, missing: [] });
@@ -143,6 +155,96 @@ test('unknown speech provider fails closed', () => {
   assert.deepEqual(status.missing, ['SPEECH_PROVIDER']);
 });
 
+test('speech diagnostic exposes only allowlisted provider and model identifiers', () => {
+  assert.deepEqual(buildSpeechDiagnostic({
+    speech: { provider: 'cloudflare-workers-ai', cloudflare: {
+      sttModel: '@cf/deepgram/nova-3', ttsModel: '@cf/deepgram/aura-1',
+      accountId: 'must-not-leak', gatewayId: 'must-not-leak', gatewayToken: 'must-not-leak',
+    } },
+    deepgram: { apiKey: 'must-not-leak' },
+    elevenlabs: { apiKey: 'must-not-leak', voiceId: 'must-not-leak' },
+    admission: { allowedCaller: '+14245550123' },
+  }), {
+    provider: 'cloudflare-workers-ai',
+    stt: { provider: 'cloudflare-workers-ai', model: '@cf/deepgram/nova-3' },
+    tts: { provider: 'cloudflare-workers-ai', model: '@cf/deepgram/aura-1' },
+  });
+
+  assert.deepEqual(buildSpeechDiagnostic({
+    speech: { provider: 'legacy' },
+    deepgram: { model: 'nova-2', apiKey: 'must-not-leak' },
+    elevenlabs: { modelId: 'eleven_turbo_v2_5', apiKey: 'must-not-leak', voiceId: 'must-not-leak' },
+  }), {
+    provider: 'legacy',
+    stt: { provider: 'deepgram', model: 'nova-2' },
+    tts: { provider: 'elevenlabs', model: 'eleven_turbo_v2_5' },
+  });
+});
+
+test('speech diagnostic never reflects unknown selectors or malformed model values', () => {
+  assert.deepEqual(buildSpeechDiagnostic({ speech: { provider: 'https://secret.example/token' } }), {
+    provider: 'invalid', stt: null, tts: null,
+  });
+  assert.deepEqual(buildSpeechDiagnostic({
+    speech: { provider: 'cloudflare-workers-ai', cloudflare: {
+      sttModel: 'https://secret.example/token?key=oops',
+      ttsModel: 'model with spaces',
+    } },
+  }), {
+    provider: 'cloudflare-workers-ai',
+    stt: { provider: 'cloudflare-workers-ai', model: 'invalid' },
+    tts: { provider: 'cloudflare-workers-ai', model: 'invalid' },
+  });
+  const secretLike = `nova-${'x'.repeat(100_000)}`;
+  const legacy = {
+    runtimeEnabled: true,
+    twilioAuthToken: 'twilio',
+    voiceTurnUrl: 'https://walletwccm.com/api/voice-advisor-turn',
+    voiceSharedSecret: 'shared',
+    admission: { mode: 'test', allowedCaller: '+14245550123', url: 'https://walletwccm.com/api/voice-admission' },
+    speech: { provider: 'legacy' },
+    deepgram: { apiKey: 'key', model: secretLike },
+    elevenlabs: { apiKey: 'key', voiceId: 'voice', modelId: ' eleven_turbo_v2_5 ' },
+  };
+  assert.deepEqual(buildSpeechDiagnostic(legacy), {
+    provider: 'legacy',
+    stt: { provider: 'deepgram', model: 'invalid' },
+    tts: { provider: 'elevenlabs', model: 'invalid' },
+  });
+  assert.deepEqual(buildReadiness(legacy).missing, ['DEEPGRAM_MODEL', 'ELEVENLABS_MODEL_ID']);
+});
+
+test('health and readiness status payloads stay dormant and exclude sensitive fields', () => {
+  const config = {
+    speech: { provider: 'cloudflare-workers-ai', cloudflare: {
+      sttModel: '@cf/deepgram/aura-1',
+      ttsModel: '@cf/deepgram/nova-3',
+      accountId: 'account-canary', gatewayId: 'gateway-canary', gatewayToken: 'token-canary',
+    } },
+    twilioAuthToken: 'twilio-canary',
+    voiceTurnUrl: 'https://credential-url-canary.example',
+    voiceSharedSecret: 'shared-secret-canary',
+    admission: { allowedCaller: '+14245550123' },
+  };
+  const health = buildServiceStatus(config, { liveness: true });
+  const ready = buildServiceStatus(config);
+  assert.equal(health.ok, true);
+  assert.equal(health.ready, false);
+  assert.equal(ready.ok, false);
+  assert.deepEqual(ready.speech, {
+    provider: 'cloudflare-workers-ai',
+    stt: { provider: 'cloudflare-workers-ai', model: 'invalid' },
+    tts: { provider: 'cloudflare-workers-ai', model: 'invalid' },
+  });
+  assert.ok(ready.missing.includes('CLOUDFLARE_STT_MODEL'));
+  assert.ok(ready.missing.includes('CLOUDFLARE_TTS_MODEL'));
+  const serialized = JSON.stringify({ health, ready });
+  for (const canary of [
+    'account-canary', 'gateway-canary', 'token-canary', 'twilio-canary',
+    'credential-url-canary', 'shared-secret-canary', '+14245550123',
+  ]) assert.doesNotMatch(serialized, new RegExp(canary.replace(/[+]/g, '\\+')));
+});
+
 test('test admission is unready without exact owner and durable admission URL', () => {
   const base = {
     runtimeEnabled: true,
@@ -152,6 +254,7 @@ test('test admission is unready without exact owner and durable admission URL', 
     admission: { mode: 'test', allowedCaller: '', url: '' },
     speech: { provider: 'cloudflare-workers-ai', cloudflare: {
       accountId: 'account', gatewayId: 'gateway', gatewayToken: 'token',
+      sttModel: '@cf/deepgram/nova-3', ttsModel: '@cf/deepgram/aura-1',
     } },
   };
   assert.deepEqual(buildReadiness(base).missing, [
