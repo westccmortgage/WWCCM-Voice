@@ -27,6 +27,7 @@ import { reserveSpeechCharacters } from './usage-limits.mjs';
 import { createCallAdmission, validLease } from './admission.mjs';
 import { createConversationRelay } from './conversation-relay.mjs';
 import { createRelayCoreClient } from './relay-core-client.mjs';
+import { limitRelayCall } from './twilio-call-limit.mjs';
 import {
   appendAssistantHistory,
   beginEnding,
@@ -86,6 +87,19 @@ app.post('/voice', async (req, res) => {
   const host = req.headers['x-forwarded-host'] || req.headers.host;
   if (!/^[a-z0-9.-]+(?::\d{1,5})?$/i.test(String(host || ''))) {
     return res.status(400).send('Bad Request');
+  }
+  if (config.transport === 'relay') {
+    if (config.admission.mode !== 'test' || String(req.body?.From || '') !== config.admission.allowedCaller) {
+      return res.type('text/xml').send('<Response><Hangup/></Response>');
+    }
+    try {
+      await limitRelayCall({ callSid, accountSid: config.relay.accountSid,
+        webhookAccountSid: String(req.body?.AccountSid || ''), authToken: config.twilioAuthToken,
+        maximumSeconds: config.limits.maxCallSeconds });
+    } catch {
+      console.error(JSON.stringify({ event: 'relay_call_limit', status: 'unconfirmed' }));
+      return res.type('text/xml').send('<Response><Hangup/></Response>');
+    }
   }
   let admitted;
   try {

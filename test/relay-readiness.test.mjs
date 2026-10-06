@@ -4,7 +4,8 @@ import { buildReadiness } from '../src/readiness.mjs';
 
 const base = {
   runtimeEnabled: true, twilioAuthToken: 'token', transport: 'relay',
-  relay: { url: 'https://hbqlhplgqwuesrovbiye.supabase.co/functions/v1/core-v2-voice-relay', keyId: 'render-relay', secret: 'x'.repeat(40) },
+  limits: { maxCallSeconds: 105 },
+  relay: { accountSid: 'AC' + 'b'.repeat(32), url: 'https://hbqlhplgqwuesrovbiye.supabase.co/functions/v1/core-v2-voice-relay', keyId: 'render-relay', secret: 'x'.repeat(40) },
   admission: { mode: 'test', allowedCaller: '+13105550100' },
 };
 

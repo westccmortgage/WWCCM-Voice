@@ -91,19 +91,20 @@ test('caller speaking while a reply is prepared: old reply discarded unheard, ne
   assert.deepEqual(f.output.map((message) => message.token), ['Answer to: my condo in Irvine. It is a rental.']);
 });
 
-test('a known provider refusal asks the caller to repeat once; a second ends the call', async () => {
+test('first known provider failure ends the call and never purchases a follow-up', async () => {
   const f = fixture({ turn: async (input) => ({ status: 'provider_failed', revision: input.expectedRevision + 1, reply: null,
     diagnostics: { stage: 'provider', class: 'failed_known', code: 'provider_rejected', httpStatus: 400, errorType: 'invalid_request_error', providerRequestId: 'req_1' } }) });
   await f.setup();
   await f.say('Hello?');
-  assert.equal(f.output.at(-1).token, RELAY_LINES.retry);
-  assert.equal(f.relay.snapshot().ending, false);
+  assert.equal(f.output.at(-1).token, RELAY_LINES.unavailable);
+  assert.equal(f.relay.snapshot().ending, true);
   const failure = f.logs.find((line) => line.status === 'provider_failed');
   assert.deepEqual([failure.httpStatus, failure.errorType, failure.providerRequestId], [400, 'invalid_request_error', 'req_1']);
   await f.say('Hello again?');
   assert.equal(f.output.at(-1).token, RELAY_LINES.unavailable);
   assert.equal(f.relay.snapshot().ending, true);
-  assert.equal(f.calls.at(-1)[1].reason, 'provider_failed_twice');
+  assert.equal(f.calls.at(-1)[1].reason, 'provider_failed');
+  assert.equal(turns(f).length, 1);
 });
 
 test('an outcome nobody knows ends the call at once, without a retry or an invented answer', async () => {
