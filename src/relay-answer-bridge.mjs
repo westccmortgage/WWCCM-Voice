@@ -6,14 +6,15 @@ import { limitRelayCall } from './twilio-call-limit.mjs';
 export function createRelayAnswerBridge({ now = Date.now, limit = limitRelayCall } = {}) {
   const pending = new Map();
   return {
-    begin({ callSid, caller, session, deadline, repeated, opening }) {
+    begin({ callSid, caller, session, deadline, maximumSeconds, repeated, opening }) {
       const time = now();
       for (const [id, entry] of pending) if (entry.expires < time) pending.delete(id);
       if (repeated !== false || !session || typeof opening !== 'string' || !opening || opening.length > 1000
+        || !Number.isSafeInteger(maximumSeconds) || maximumSeconds < 30 || maximumSeconds > 105
         || !Number.isSafeInteger(deadline)
         || deadline <= time || deadline > time + 105000 || pending.size >= 3) throw Error('answer_bridge_refused');
       const ticket = randomUUID();
-      pending.set(ticket, { callSid, caller, session, deadline, expires: Math.min(deadline, time + 45000) });
+      pending.set(ticket, { callSid, caller, session, deadline, maximumSeconds, expires: Math.min(deadline, time + 45000) });
       // Say answers the incoming call before Redirect asks for the next TwiML.
       // No Connect, WebSocket, Call Update or model request in this document.
       const spoken = opening.replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]);
@@ -25,10 +26,10 @@ export function createRelayAnswerBridge({ now = Date.now, limit = limitRelayCall
       if (!entry || entry.callSid !== callSid || entry.caller !== caller) throw Error('answer_bridge_refused');
       pending.delete(ticket); // Consume BEFORE dispatch, including unknown outcomes.
       if (entry.expires < now() || callStatus !== 'in-progress') throw Error('answer_bridge_refused');
-      // Reserve the full HTTP deadline too; conservatively shorten the limit.
-      const remaining = Math.floor((entry.deadline - now() - 5000) / 1000);
-      if (remaining < 30 || remaining > 105) throw Error('answer_bridge_refused');
-      await limit({ callSid, accountSid, webhookAccountSid, authToken, maximumSeconds: remaining });
+      // Keep the full HTTP budget inside the original session deadline.
+      if (entry.deadline - now() <= 5000) throw Error('answer_bridge_refused');
+      // Twilio counts TimeLimit from call answer, not from this update.
+      await limit({ callSid, accountSid, webhookAccountSid, authToken, maximumSeconds: entry.maximumSeconds });
       if (now() >= entry.deadline) throw Error('answer_bridge_refused');
       return entry.session;
     },

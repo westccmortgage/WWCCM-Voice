@@ -89,7 +89,7 @@ globalThis.fetch = async (input, init = {}) => {
     if (!inProgressCalls.has(callSid)) return new Response(JSON.stringify({ code: 21220,
       message: 'Call is not in-progress. Cannot update.' }), { status: 400 });
     const seconds = Number(new URLSearchParams(init.body).get('TimeLimit'));
-    assert.ok(seconds >= 30 && seconds <= 100);
+    assert.equal(seconds, 105); // Total duration from answer, not remaining time.
     return new Response(JSON.stringify({ sid: callSid, account_sid: 'AC' + '0'.repeat(32) }));
   }
   if (url === ADMISSION_URL) throw new Error('relay mode must not use the Netlify admission endpoint');
