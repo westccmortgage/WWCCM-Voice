@@ -18,8 +18,8 @@ export function createRelayAnswerBridge({ now = Date.now, limit = limitRelayCall
       // Say answers the incoming call before Redirect asks for the next TwiML.
       // No Connect, WebSocket, Call Update or model request in this document.
       const spoken = opening.replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]);
-      return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-US">${spoken}</Say>`
-        + `<Redirect method="POST">/voice-connected?ticket=${ticket}</Redirect></Response>`;
+      return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-US" voice="woman" loop="1">${spoken}</Say>`
+        + `<Redirect method="POST">/voice-connected?ticket=${ticket}#ct=1000&amp;rt=5000&amp;tt=5000&amp;rc=0</Redirect></Response>`;
     },
     async connect({ ticket, callSid, caller, callStatus, accountSid, webhookAccountSid, authToken }) {
       const entry = pending.get(ticket);

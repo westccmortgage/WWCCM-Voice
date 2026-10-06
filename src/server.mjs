@@ -141,7 +141,7 @@ app.post('/voice', async (req, res) => {
   if (config.transport === 'relay') {
     try {
       res.type('text/xml').send(relayAnswerBridge.begin({ callSid, caller: admitted.caller,
-        session, deadline, maximumSeconds: config.limits.maxCallSeconds, repeated: admitted.repeated,
+        session, deadline, maximumSeconds: Math.min(90, config.limits.maxCallSeconds), repeated: admitted.repeated,
         opening: `${disclosuresFor('en').recording} ${disclosuresFor('en').ai}` }));
     } catch {
       res.type('text/xml').send('<Response><Hangup/></Response>');

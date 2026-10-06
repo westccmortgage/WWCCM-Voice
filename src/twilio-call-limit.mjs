@@ -53,7 +53,7 @@ export async function limitRelayCall({ callSid, accountSid, webhookAccountSid, a
   }
   let response;
   try { response = await fetchImpl(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${callSid}.json`, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000),
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(3000),
     headers: { authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`,
       'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ TimeLimit: String(maximumSeconds) }).toString(),

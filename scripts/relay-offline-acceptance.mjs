@@ -89,7 +89,7 @@ globalThis.fetch = async (input, init = {}) => {
     if (!inProgressCalls.has(callSid)) return new Response(JSON.stringify({ code: 21220,
       message: 'Call is not in-progress. Cannot update.' }), { status: 400 });
     const seconds = Number(new URLSearchParams(init.body).get('TimeLimit'));
-    assert.equal(seconds, 105); // Total duration from answer, not remaining time.
+    assert.equal(seconds, 90); // Total duration from answer, not remaining time.
     return new Response(JSON.stringify({ sid: callSid, account_sid: 'AC' + '0'.repeat(32) }));
   }
   if (url === ADMISSION_URL) throw new Error('relay mode must not use the Netlify admission endpoint');
@@ -122,9 +122,12 @@ async function placeCall() {
     body: new URLSearchParams(params) });
   assert.equal(response.status, 200);
   const bootstrap = await response.text();
-  assert.match(bootstrap, /<Say language="en-US">Hi, you.*West Coast Capital Mortgage.*recorded for quality.*not a licensed loan officer/);
+  assert.match(bootstrap, /<Say language="en-US" voice="woman" loop="1">Hi, you.*West Coast Capital Mortgage.*recorded for quality.*not a licensed loan officer/);
   assert.doesNotMatch(bootstrap, /ConversationRelay/);
-  const path = bootstrap.match(/<Redirect method="POST">([^<]+)<\/Redirect>/)[1];
+  const redirect = bootstrap.match(/<Redirect method="POST">([^<]+)<\/Redirect>/)[1].replaceAll('&amp;', '&');
+  const redirectUrl = new URL(redirect, `https://${HOST}`);
+  assert.equal(redirectUrl.hash, '#ct=1000&rt=5000&tt=5000&rc=0');
+  const path = redirectUrl.pathname + redirectUrl.search; // Fragment is not signed/sent.
   inProgressCalls.add(callSid); // Simulated execution of Say answers the call.
   const connectedParams = { ...params, CallStatus: 'in-progress' };
   const connected = await realFetch(`http://127.0.0.1:${PORT}${path}`, { method: 'POST',

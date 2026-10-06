@@ -11,14 +11,15 @@ test('accepted incoming call answers first; only in-progress redirect installs d
     assert.ok(args.maximumSeconds <= 105);
     // Twilio TimeLimit is the TOTAL duration from answer, not time from update.
     const carrierDeadline = 1000 + args.maximumSeconds * 1000;
-    assert.equal(carrierDeadline, 106000);
-    assert.equal(args.maximumSeconds, 105);
+    assert.equal(carrierDeadline, 91000);
+    assert.equal(args.maximumSeconds, 90);
   } });
-  const bootstrap = bridge.begin({ callSid, caller, session: 'offline-session', deadline: 106000, maximumSeconds: 105, repeated: false, opening: 'Company recording AI non-licensed disclosures.' });
-  assert.match(bootstrap, /<Say language="en-US">Company recording AI non-licensed disclosures\.<\/Say>.*<Redirect/);
+  const bootstrap = bridge.begin({ callSid, caller, session: 'offline-session', deadline: 106000, maximumSeconds: 90, repeated: false, opening: 'Company recording AI non-licensed disclosures.' });
+  assert.match(bootstrap, /<Say language="en-US" voice="woman" loop="1">Company recording AI non-licensed disclosures\.<\/Say>.*<Redirect/);
   assert.doesNotMatch(bootstrap, /Connect>|ConversationRelay|session|CallSid/);
+  assert.match(bootstrap, /#ct=1000&amp;rt=5000&amp;tt=5000&amp;rc=0<\/Redirect>/);
   assert.equal(attempts, 0); // Original pre-answer Call Update would fail 21220.
-  const ticket = bootstrap.match(/ticket=([^<]+)/)[1];
+  const ticket = bootstrap.match(/ticket=([^#<]+)/)[1];
   status = 'in-progress'; time = 44000; // 43 seconds already elapsed since answer.
   const session = await bridge.connect({ ticket, callSid, caller, callStatus: status });
   assert.equal(session, 'offline-session'); assert.equal(attempts, 1);
@@ -29,7 +30,7 @@ test('accepted incoming call answers first; only in-progress redirect installs d
 test('wrong status, expiration, restart, repeated admission and unknown update never permit another dispatch', async () => {
   let time = 1000, attempts = 0;
   const options = { now: () => time, limit: async () => { attempts++; throw Error('unknown'); } };
-  const make = (bridge) => bridge.begin({ callSid, caller, session: 'offline-session', deadline: 106000, maximumSeconds: 105, repeated: false, opening: 'Company recording AI non-licensed disclosures.' }).match(/ticket=([^<]+)/)[1];
+  const make = (bridge) => bridge.begin({ callSid, caller, session: 'offline-session', deadline: 106000, maximumSeconds: 90, repeated: false, opening: 'Company recording AI non-licensed disclosures.' }).match(/ticket=([^#<]+)/)[1];
   const bridge = createRelayAnswerBridge(options);
   let ticket = make(bridge);
   await assert.rejects(bridge.connect({ ticket, callSid, caller, callStatus: 'accepted' }));
@@ -40,7 +41,7 @@ test('wrong status, expiration, restart, repeated admission and unknown update n
   assert.equal(attempts, 0);
   time = 1000; ticket = make(bridge);
   await assert.rejects(createRelayAnswerBridge(options).connect({ ticket, callSid, caller, callStatus: 'in-progress' }));
-  assert.throws(() => bridge.begin({ callSid, caller, session: 'offline-session', deadline: 106000, maximumSeconds: 105, repeated: true, opening: 'Company recording AI non-licensed disclosures.' }));
+  assert.throws(() => bridge.begin({ callSid, caller, session: 'offline-session', deadline: 106000, maximumSeconds: 90, repeated: true, opening: 'Company recording AI non-licensed disclosures.' }));
   await assert.rejects(bridge.connect({ ticket, callSid, caller, callStatus: 'in-progress' }));
   await assert.rejects(bridge.connect({ ticket, callSid, caller, callStatus: 'in-progress' }));
   assert.equal(attempts, 1);
