@@ -12,7 +12,7 @@ services:
     plan: starter            # always-on; do NOT use "free" for telephony
     region: oregon
     branch: main
-    buildCommand: npm install
+    buildCommand: npm ci --ignore-scripts
     startCommand: node src/server.mjs
     healthCheckPath: /health
     autoDeploy: true
@@ -60,6 +60,8 @@ services:
         sync: false          # shared only with the core-v2-voice-relay function
       - key: TWILIO_ACCOUNT_SID
         sync: false          # optional: pins the ConversationRelay setup account
+      - key: VOICE_RELAY_TURN_TIMEOUT_MS
+        value: 9000          # no retry; an ambiguous timeout ends the call
 
       # --- required: fail-closed verification for HTTP and WebSocket traffic ---
       - key: TWILIO_AUTH_TOKEN

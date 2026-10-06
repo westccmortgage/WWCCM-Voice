@@ -295,10 +295,15 @@ await scenario('10 provider refusal: a known 400 asks the caller to repeat and t
 console.log = quiet;
 const sorted = latencies.filter((value) => value !== null).sort((a, b) => a - b);
 const pct = (p) => sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
-for (const [name, verdict] of results) console.log(`${verdict.startsWith('PASS') ? 'PASS' : 'FAIL'}  ${name}${verdict.startsWith('PASS') ? '' : ` — ${verdict.slice(6)}`}`);
-console.log(JSON.stringify({ scriptedModelDelayMs: MODEL_DELAY_MS, measuredTurns: sorted.length,
+const report = results.map(([name, verdict]) =>
+  `${verdict.startsWith('PASS') ? 'PASS' : 'FAIL'}  ${name}${verdict.startsWith('PASS') ? '' : ` — ${verdict.slice(6)}`}`);
+report.push(JSON.stringify({ scriptedModelDelayMs: MODEL_DELAY_MS, measuredTurns: sorted.length,
   promptToTextP50Ms: Math.round(pct(50)), promptToTextP95Ms: Math.round(pct(95)), promptToTextMaxMs: Math.round(sorted.at(-1)),
   overheadP95Ms: Math.round(pct(95) - MODEL_DELAY_MS) }));
 const leaked = serverLogs.some((line) => /Alex|refinance my house|7\.25/.test(JSON.stringify(line)));
-console.log(leaked ? 'FAIL  logs contain caller speech' : 'PASS  logs contain no caller speech');
+report.push(leaked ? 'FAIL  logs contain caller speech' : 'PASS  logs contain no caller speech');
+// When stdout is a pipe (CI and Codex), process.exit can discard the final
+// acceptance table. Wait for the stream before terminating the listening
+// test server so the evidence is always visible.
+await new Promise((resolve) => process.stdout.write(`${report.join('\n')}\n`, resolve));
 process.exit(results.every(([, verdict]) => verdict === 'PASS') && !leaked ? 0 : 1);

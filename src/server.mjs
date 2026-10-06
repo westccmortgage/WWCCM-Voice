@@ -708,8 +708,13 @@ function isGoodbye(text) {
 
 server.listen(config.port, () => {
   console.log(`[wwccm-voice] listening on :${config.port}`);
-  if (!config.voiceTurnUrl) console.warn('[wwccm-voice] WARNING: VOICE_TURN_URL not set — the brain is unreachable.');
-  if (config.speech.provider === 'cloudflare-workers-ai') {
+  if (config.transport !== 'relay' && !config.voiceTurnUrl) {
+    console.warn('[wwccm-voice] WARNING: VOICE_TURN_URL not set — the brain is unreachable.');
+  }
+  if (config.transport === 'relay') {
+    // Twilio owns STT/TTS and Core owns the model on this path. Legacy
+    // speech and Netlify-brain variables are intentionally irrelevant.
+  } else if (config.speech.provider === 'cloudflare-workers-ai') {
     if (!config.speech.cloudflare.accountId) console.warn('[wwccm-voice] WARNING: CLOUDFLARE_ACCOUNT_ID not set.');
     if (!config.speech.cloudflare.gatewayId) console.warn('[wwccm-voice] WARNING: CLOUDFLARE_AI_GATEWAY_ID not set.');
     if (!config.speech.cloudflare.gatewayToken) console.warn('[wwccm-voice] WARNING: CLOUDFLARE_AI_GATEWAY_TOKEN not set.');
@@ -718,5 +723,7 @@ server.listen(config.port, () => {
     if (!config.elevenlabs.apiKey) console.warn('[wwccm-voice] WARNING: ELEVENLABS_API_KEY not set.');
   }
   if (!config.twilioAuthToken) console.warn('[wwccm-voice] LOCKED: TWILIO_AUTH_TOKEN not set; voice and media endpoints reject all traffic.');
-  if (!config.voiceSharedSecret) console.warn('[wwccm-voice] LOCKED: VOICE_SHARED_SECRET not set; brain requests are disabled.');
+  if (config.transport !== 'relay' && !config.voiceSharedSecret) {
+    console.warn('[wwccm-voice] LOCKED: VOICE_SHARED_SECRET not set; brain requests are disabled.');
+  }
 });
