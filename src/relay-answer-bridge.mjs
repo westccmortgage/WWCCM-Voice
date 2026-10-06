@@ -6,16 +6,18 @@ import { limitRelayCall } from './twilio-call-limit.mjs';
 export function createRelayAnswerBridge({ now = Date.now, limit = limitRelayCall } = {}) {
   const pending = new Map();
   return {
-    begin({ callSid, caller, session, deadline, repeated }) {
+    begin({ callSid, caller, session, deadline, repeated, opening }) {
       const time = now();
       for (const [id, entry] of pending) if (entry.expires < time) pending.delete(id);
-      if (repeated !== false || !session || !Number.isSafeInteger(deadline)
+      if (repeated !== false || !session || typeof opening !== 'string' || !opening || opening.length > 1000
+        || !Number.isSafeInteger(deadline)
         || deadline <= time || deadline > time + 105000 || pending.size >= 3) throw Error('answer_bridge_refused');
       const ticket = randomUUID();
-      pending.set(ticket, { callSid, caller, session, deadline, expires: Math.min(deadline, time + 10000) });
+      pending.set(ticket, { callSid, caller, session, deadline, expires: Math.min(deadline, time + 45000) });
       // Say answers the incoming call before Redirect asks for the next TwiML.
       // No Connect, WebSocket, Call Update or model request in this document.
-      return `<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting.</Say>`
+      const spoken = opening.replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]);
+      return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-US">${spoken}</Say>`
         + `<Redirect method="POST">/voice-connected?ticket=${ticket}</Redirect></Response>`;
     },
     async connect({ ticket, callSid, caller, callStatus, accountSid, webhookAccountSid, authToken }) {

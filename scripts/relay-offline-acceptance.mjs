@@ -122,7 +122,7 @@ async function placeCall() {
     body: new URLSearchParams(params) });
   assert.equal(response.status, 200);
   const bootstrap = await response.text();
-  assert.match(bootstrap, /<Say>Connecting\.<\/Say>/);
+  assert.match(bootstrap, /<Say language="en-US">Hi, you.*West Coast Capital Mortgage.*recorded for quality.*not a licensed loan officer/);
   assert.doesNotMatch(bootstrap, /ConversationRelay/);
   const path = bootstrap.match(/<Redirect method="POST">([^<]+)<\/Redirect>/)[1];
   inProgressCalls.add(callSid); // Simulated execution of Say answers the call.
@@ -159,7 +159,7 @@ async function placeCall() {
     const reply = await next();
     return { ...reply, latencyMs: reply ? reply.at - sentAt : null };
   }
-  return { callSid, twiml, attribute, send, say, next, close: () => socket.close() };
+  return { callSid, bootstrap, twiml, attribute, send, say, next, close: () => socket.close() };
 }
 
 const results = [];
@@ -177,7 +177,8 @@ await scenario('1 greeting: disclosures first, not interruptible, recorded as th
   script = [];
   const call = await placeCall();
   assert.equal(current.repository.admissions.length, 1, 'admitted through Core with the relay credential');
-  assert.match(call.attribute('welcomeGreeting'), /recorded for quality.*not a licensed loan officer.*How can I help you today\?/);
+  assert.match(call.bootstrap, /recorded for quality.*not a licensed loan officer/);
+  assert.equal(call.attribute('welcomeGreeting'), 'How can I help you today?');
   assert.equal(call.attribute('welcomeGreetingInterruptible'), 'none');
   assert.equal(current.repository.state.history[0].role, 'assistant');
   assert.match(current.repository.state.history[0].text, /This call may be recorded/);

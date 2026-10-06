@@ -141,7 +141,8 @@ app.post('/voice', async (req, res) => {
   if (config.transport === 'relay') {
     try {
       res.type('text/xml').send(relayAnswerBridge.begin({ callSid, caller: admitted.caller,
-        session, deadline, repeated: admitted.repeated }));
+        session, deadline, repeated: admitted.repeated,
+        opening: `${disclosuresFor('en').recording} ${disclosuresFor('en').ai}` }));
     } catch {
       res.type('text/xml').send('<Response><Hangup/></Response>');
     }
@@ -176,8 +177,8 @@ async function admitThroughRelay(callSid, from) {
 
 const escapeXml = (value) => String(value).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]);
 
-// The opening disclosures are Twilio's welcome greeting: spoken at once, not
-// interruptible, and recorded by Core as Emma's opening line.
+// Say speaks the fixed disclosures before the redirect; ConversationRelay
+// asks the opening question only after the duration guard. Core records both.
 function relayGreeting() {
   const d = disclosuresFor('en');
   return `${d.recording} ${d.ai} ${d.greeting}`;
@@ -186,7 +187,7 @@ function relayGreeting() {
 function relayTwiml(host, callSid, session) {
   const attributes = [
     ['url', `wss://${host}/relay`],
-    ['welcomeGreeting', relayGreeting()],
+    ['welcomeGreeting', disclosuresFor('en').greeting],
     ['welcomeGreetingInterruptible', 'none'],
     ['language', 'en-US'],
     ['interruptible', 'speech'],
