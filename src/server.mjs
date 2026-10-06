@@ -24,7 +24,7 @@ import { issueCallSession, validateStartIdentity, verifyTwilioRequest } from './
 import { buildServiceStatus, canAcceptTraffic } from './readiness.mjs';
 import { beginBrainRequest, endCall, finishBrainRequest } from './call-lifecycle.mjs';
 import { reserveSpeechCharacters } from './usage-limits.mjs';
-import { createCallAdmission } from './admission.mjs';
+import { createCallAdmission, validLease } from './admission.mjs';
 import { createConversationRelay } from './conversation-relay.mjs';
 import { createRelayCoreClient } from './relay-core-client.mjs';
 import {
@@ -89,7 +89,9 @@ app.post('/voice', async (req, res) => {
   }
   let admitted;
   try {
-    admitted = await admission.admitVoiceWebhook({ callSid, from: String(req.body?.From || '') });
+    admitted = config.transport === 'relay'
+      ? await admitThroughRelay(callSid, String(req.body?.From || ''))
+      : await admission.admitVoiceWebhook({ callSid, from: String(req.body?.From || '') });
   } catch {
     console.error('[voice] durable admission outcome unavailable; failing closed');
     return res.status(503).send('Unavailable');
@@ -126,6 +128,18 @@ app.post('/voice', async (req, res) => {
     `</Response>`;
   res.type('text/xml').send(twiml);
 });
+
+// Relay mode admits through Core's relay door with the relay credential, so
+// the pilot never needs the Netlify brain or core-v2-voice-turn armed.
+async function admitThroughRelay(callSid, from) {
+  if (config.admission.mode !== 'test' || from !== config.admission.allowedCaller) return null;
+  const lease = await createRelayCoreClient({ url: config.relay.url, keyId: config.relay.keyId,
+    secret: config.relay.secret, callSid }).admit({ caller: from }).catch((error) => {
+    if (error?.kind === 'refused') return null; // e.g. suite call limit reached
+    throw error;
+  });
+  return validLease(lease) ? Object.freeze({ ...lease, caller: from }) : null;
+}
 
 const escapeXml = (value) => String(value).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]);
 

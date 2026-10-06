@@ -22,7 +22,7 @@ const MODEL_DELAY_MS = Number(process.env.MODEL_DELAY_MS ?? 700);
 const AUTH_TOKEN = 'offline-twilio-token';
 const SHARED = 'offline-shared-secret';
 const RELAY_SECRET = 'offline-relay-secret-0123456789abcdef0123';
-const OWNER = '+13105550100';
+const OWNER = '+13105550100'; // matches the fixture admission policy owner digest
 const HOST = 'example.test';
 const PORT = 18_000 + Math.floor(Math.random() * 1000);
 const RELAY_URL = 'https://hbqlhplgqwuesrovbiye.supabase.co/functions/v1/core-v2-voice-relay';
@@ -39,7 +39,7 @@ const { createRelayHandler } = await core('supabase/functions/core-v2-voice-rela
 const { RelayService, RELAY_PROTOCOL } = await core('workers/core-v2-voice/relay-service.ts');
 const { AnthropicRelayModel } = await core('workers/core-v2-voice/relay-provider.ts');
 const { relayEnvironment } = await core('workers/core-v2-voice/relay-config.ts');
-const { loadVoiceBudgetPolicy, loadVoiceRuntimeConfig } = await core('workers/core-v2-voice/runtime-assembly.ts');
+const { loadVoiceAdmissionPolicy, loadVoiceBudgetPolicy, loadVoiceRuntimeConfig } = await core('workers/core-v2-voice/runtime-assembly.ts');
 const { BUSINESS, MemoryRelayRepository, relayEnv, textReply } = await core('workers/core-v2-voice/tests/relay-fixtures.mjs');
 const { voiceRequestSignature } = await core('supabase/functions/_shared/core-v2/voice-auth.ts');
 const { TransportFault } = await core('workers/core-v2-runtime/transport/transport.ts');
@@ -71,7 +71,8 @@ function newCore() {
     replayStore: { async claim(keyId, nonce) { const key = `${keyId}:${nonce}`; if (nonces.has(key)) return false; nonces.add(key); return true; } },
     service: new RelayService({ repository, model: new AnthropicRelayModel({ configuration: relayConfigured.configuration,
       runtime: relayConfigured.runtime, transport, environment: env }), authorizedMaximumUsd: policy.authorizedMaximumUsd,
-      maximumPerTurnUsd: policy.maximumPerTurnUsd, businessFacts: BUSINESS, log: () => {} }),
+      maximumPerTurnUsd: policy.maximumPerTurnUsd, businessFacts: BUSINESS, log: () => {},
+      admissionPolicy: loadVoiceAdmissionPolicy(relayEnvironment(env)) }),
   }) };
 }
 let current = newCore();
@@ -81,14 +82,7 @@ const coreBodies = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input instanceof URL ? input.href : input);
-  if (url === ADMISSION_URL) {
-    const body = JSON.parse(init.body);
-    const now = Date.now();
-    return new Response(JSON.stringify(body.action === 'admit' ? {
-      protocol: 'core-v2.voice-admission.1', suiteId: 'offline-suite', callIdentityDigest: 'a'.repeat(64),
-      answeredAtMs: now, deadlineMs: now + 120_000, maximumTurns: 12, maximumBrainRequests: 12, maximumTtsCharacters: 4000, repeated: false,
-    } : { protocol: 'core-v2.voice-admission-stream.1', suiteId: body.suiteId, claimed: true }), { status: 200 });
-  }
+  if (url === ADMISSION_URL) throw new Error('relay mode must not use the Netlify admission endpoint');
   if (url === RELAY_URL) {
     coreBodies.push(JSON.parse(init.body));
     // Behave like fetch: the caller's abort ends the wait (the server side,
@@ -161,6 +155,7 @@ const reply = (text, extra) => ({ reply: textReply(text, undefined, undefined), 
 await scenario('1 greeting: disclosures first, not interruptible, recorded as the opening', async () => {
   script = [];
   const call = await placeCall();
+  assert.equal(current.repository.admissions.length, 1, 'admitted through Core with the relay credential');
   assert.match(call.attribute('welcomeGreeting'), /recorded for quality.*not a licensed loan officer.*How can I help you today\?/);
   assert.equal(call.attribute('welcomeGreetingInterruptible'), 'none');
   assert.equal(current.repository.state.history[0].role, 'assistant');

@@ -25,8 +25,13 @@ caller ─PSTN─ Twilio ConversationRelay (STT, TTS, barge-in)
 
 - `/voice` is unchanged as a URL. In relay mode it returns ConversationRelay
   TwiML; the disclosures are Twilio's `welcomeGreeting`, not interruptible.
-  The existing admission still admits the call; Core's `claim_session` binds
-  it to exactly one stream.
+- Admission goes through the same relay door (`admit`, same SQL door and
+  suite policy shape as before, `CORE_V2_RELAY_ADMISSION_POLICY`), so the
+  pilot needs neither the Netlify brain nor `core-v2-voice-turn` armed.
+  `claim_session` then binds the admitted call to exactly one stream.
+- The relay has its own switches: `CORE_V2_RELAY_ENABLED` and
+  `CORE_V2_RELAY_ALLOW_PAID_CALLS`. The global `CORE_V2_ALLOW_PAID_CALLS`
+  is not consulted or needed, so no other Core path is armed.
 - Render holds no model key, only one new HMAC secret shared with
   `core-v2-voice-relay`. The prototype's backend/text-model modules are
   replaced: the model is chosen by `CORE_V2_RELAY_PROVIDER_REGISTRY` in Core.

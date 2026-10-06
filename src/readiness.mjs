@@ -17,7 +17,7 @@ export function buildReadiness(config) {
   const transport = config.transport || 'media-stream';
   if (transport !== 'media-stream' && transport !== 'relay') missing.push('VOICE_TRANSPORT');
   if (transport !== 'relay' && !present(config.voiceTurnUrl)) missing.push('VOICE_TURN_URL');
-  if (!present(config.voiceSharedSecret)) missing.push('VOICE_SHARED_SECRET');
+  if (transport !== 'relay' && !present(config.voiceSharedSecret)) missing.push('VOICE_SHARED_SECRET');
   if (transport === 'relay') {
     try {
       const url = new URL(config.relay?.url || '');
@@ -30,7 +30,9 @@ export function buildReadiness(config) {
   const admission = config.admission || {};
   if (admission.mode === 'test') {
     if (!/^\+[1-9]\d{7,14}$/.test(admission.allowedCaller || '')) missing.push('VOICE_TEST_ALLOWED_CALLER');
-    if (!present(admission.url)) missing.push('VOICE_ADMISSION_URL');
+    if (transport === 'relay') {
+      // Admission goes through the signed Core relay door in this mode.
+    } else if (!present(admission.url)) missing.push('VOICE_ADMISSION_URL');
     else try {
       const url = new URL(admission.url);
       if (url.href !== 'https://walletwccm.com/api/voice-admission') missing.push('VOICE_ADMISSION_URL');

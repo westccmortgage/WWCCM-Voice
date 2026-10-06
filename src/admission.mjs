@@ -44,7 +44,7 @@ export function createCallAdmission(settings = {}, { fetchImpl = fetch } = {}) {
   });
 }
 
-function validLease(value) {
+export function validLease(value) {
   return value?.protocol === 'core-v2.voice-admission.1'
     && SUITE_ID.test(value.suiteId || '') && /^[a-f0-9]{64}$/.test(value.callIdentityDigest || '')
     && Number.isSafeInteger(value.answeredAtMs) && Number.isSafeInteger(value.deadlineMs)

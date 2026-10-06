@@ -81,6 +81,7 @@ export function createRelayCoreClient({ url, keyId, secret, callSid, fetchImpl =
   }
 
   return Object.freeze({
+    admit: async ({ caller }) => (await post({ op: 'admit', caller }, 8_000)).lease,
     claimSession: ({ suiteId, greeting }) => post({ op: 'claim_session', suiteId, greeting }, 5_000),
     turn: ({ requestId, expectedRevision, utterance, previous }) =>
       post({ op: 'turn', requestId, expectedRevision, utterance, previous: previous ?? null }, turnTimeoutMs),
