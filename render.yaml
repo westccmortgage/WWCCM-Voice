@@ -49,6 +49,18 @@ services:
       - key: ELEVENLABS_MODEL_ID
         value: eleven_turbo_v2_5
 
+      # --- Emma on Twilio ConversationRelay (off unless VOICE_TRANSPORT=relay) ---
+      - key: VOICE_TRANSPORT
+        value: media-stream  # relay = ConversationRelay TwiML + /relay socket
+      - key: VOICE_RELAY_URL
+        sync: false          # https://<project>.supabase.co/functions/v1/core-v2-voice-relay
+      - key: VOICE_RELAY_KEY_ID
+        sync: false          # must match CORE_V2_RELAY_KEY_ID in Core
+      - key: VOICE_RELAY_HMAC_SECRET
+        sync: false          # shared only with the core-v2-voice-relay function
+      - key: TWILIO_ACCOUNT_SID
+        sync: false          # optional: pins the ConversationRelay setup account
+
       # --- required: fail-closed verification for HTTP and WebSocket traffic ---
       - key: TWILIO_AUTH_TOKEN
         sync: false

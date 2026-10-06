@@ -1,177 +1,228 @@
-// Dormant protocol adapter: not imported by server.mjs. No provider SDK or keys.
-import { createHash } from 'node:crypto';
+// Emma on Twilio ConversationRelay: the phone side of one call.
+//
+// Twilio does speech recognition, speech synthesis and barge-in, and sends
+// this socket text. For each final caller utterance this module makes ONE
+// signed request to Core's relay door, which claims the turn, reserves the
+// money, makes the model request, settles it and clears what may be said.
+// This module only decides what to do with the answer on the phone:
+//
+//  - speak a cleared reply, and report on the next request whether it was
+//    handed to Twilio, cut off by the caller (with the heard prefix), or
+//    discarded because the caller had already moved on;
+//  - if the caller speaks while a reply is being prepared, the old reply is
+//    discarded unheard and the new words are answered next (never two model
+//    requests in flight for one call; never a resend of the same turn);
+//  - say something specific when a turn cannot be answered: a known provider
+//    refusal asks the caller to repeat (once), a limit ends politely, and an
+//    outcome nobody knows ends the call without guessing or retrying;
+//  - goodbye is handled here, without a model request.
+//
+// "Submitted" never means "heard". Nothing here computes a mortgage figure.
 import { verifyTwilioRequest, validateRelaySession } from './security.mjs';
-import { RelayPreSubmissionError } from './relay-text-model.mjs';
 
-const hash = value => createHash('sha256').update(value).digest('hex');
-const clone = value => structuredClone(value);
-const validText = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 4000;
+export const RELAY_LINES = Object.freeze({
+  retry: 'Sorry, I had trouble with that. Could you say it again?',
+  unavailable: "I'm sorry, I'm having a technical problem and can't safely continue this call right now. Please call West Coast Capital Mortgage again shortly. Goodbye.",
+  limit: "We've reached the time limit for this call. Thank you for calling West Coast Capital Mortgage. Goodbye.",
+  goodbye: 'Thanks for calling West Coast Capital Mortgage. Goodbye.',
+});
 
-// Extract only explicit, first-person assertions. Hypotheticals/third parties
-// stay in the transcript; they cannot overwrite authoritative caller facts.
-export function callerFacts(text) {
-  if (/\b(if|suppose|hypothetical|hypothetically|friend|neighbor|neighbour)\b/i.test(text)) return {};
-  const facts = {};
-  const name = text.match(/\bmy name is ([A-Z][a-z]{1,30})(?=[.,! ]|$)|\b(?:I'm|I am) ([A-Z][a-z]{1,30})(?=[.,!]|$)/);
-  if (name) facts.name = name[1] ?? name[2];
-  const goal = text.match(/\bI (?:want|need) (?:to )?([^.!?]{3,250})/i);
-  if (goal && !/^\$?\d/.test(goal[1])) facts.goal = goal[1].trim();
-  const rate = text.match(/\bmy (?:current )?(?:mortgage )?rate is (?:now )?(\d+(?:\.\d+)?)\s*(?:%|percent)/i);
-  if (rate && +rate[1] >= 0 && +rate[1] <= 30) facts.mortgageRatePercent = +rate[1];
-  const income = text.match(/\bmy monthly income is \$([\d,]+(?:\.\d{1,2})?)/i);
-  if (income) facts.monthlyIncomeUsd = +income[1].replaceAll(',', '');
-  const repairs = text.match(/\bI (?:want|need) \$([\d,]+(?:\.\d{1,2})?) for repairs/i);
-  if (repairs) facts.repairsUsd = +repairs[1].replaceAll(',', '');
-  const limit = text.match(/\bI can (?:put|pay) (?:up to )?\$([\d,]+(?:\.\d{1,2})?) (?:a|per) month/i);
-  if (limit) facts.repairsPaymentLimitUsd = +limit[1].replaceAll(',', '');
-  for (const [key,value] of Object.entries(facts)) if (typeof value === 'number' && (!Number.isFinite(value) || value < 0 || value > 1e9)) delete facts[key];
-  return facts;
+const GOODBYE = /^(?:(?:ok(?:ay)?|alright|great|thanks|thank you|no|nope)[,.!\s]+)*(?:good ?bye|bye(?: bye)?|that'?s all|that'?s it|i'?m (?:all )?done|hang up|have a (?:good|nice|great) (?:day|one|night))\b/i;
+const LIMIT_CODES = new Set(['turn_limit', 'request_limit', 'budget_exhausted', 'relay_deadline', 'relay_closed', 'admission_expired']);
+
+/* Rough spoken length, so "end" is sent after the last line, not over it. */
+export const speechMs = (text) => 1_500 + text.length * 65;
+
+function percentile(values, p) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
 }
 
-// Backend is deliberately mandatory: a production implementation must supply
-// durable CAS/idempotency, cost reservations/settlement and reply authorization.
-// Ordinary conversation does not call Core's propose/finalize planner.
-export function createConversationRelay({ request, authToken, accountSid, lease,
-  backend, model, send, now = Date.now, schedule = setTimeout, unschedule = clearTimeout }) {
-  const required = ['claimSession', 'claimTurn', 'reserve', 'settle', 'hold', 'release', 'approveReply', 'prepareReply', 'markSubmitted', 'claimDispatch', 'interrupt'];
-  const claims = validateRelaySession(lease?.session, lease?.callSid, authToken, now());
-  if (!verifyTwilioRequest(request, authToken, { websocket: true }) || !/^AC[a-f0-9]{32}$/i.test(accountSid)
-    || !claims || Object.entries(claims).some(([key, value]) => lease[key] !== value)
-    || !Number.isSafeInteger(lease.deadline) || lease.deadline <= now()
-    || lease.deadline > claims.answeredAt + 120_000
-    || !Number.isInteger(lease.maximumTurns) || lease.maximumTurns < 1 || lease.maximumTurns > 17
-    || !Number.isInteger(lease.maximumRequests) || lease.maximumRequests < 1 || lease.maximumRequests > 34
-    || !Number.isInteger(lease.maximumCharacters) || lease.maximumCharacters < 1 || lease.maximumCharacters > 4000
-    || required.some(key => typeof backend?.[key] !== 'function') || typeof model?.generate !== 'function'
-    || typeof send !== 'function') throw Error('relay_not_authorized');
-  let ready = false, closed = false, busy = null, revision = 0, epoch = 0, requests = 0, characters = 0;
-  let state = null, lastReply = null; const finalPrompts = new Set();
-  const deadlineTimer = schedule(() => { void close('deadline'); }, lease.deadline - now());
-  function emit(message) { if (!closed && now() < lease.deadline) send(message); }
-  async function close(reason = 'closed') {
-    if (closed) return;
-    closed = true; const previousEpoch = epoch; epoch++; busy?.controller.abort(); unschedule(deadlineTimer);
-    if (ready) {
-      try { await backend.interrupt({ callSid: lease.callSid, revision, expectedEpoch: previousEpoch, epoch,
-        fenceRequestId: busy?.requestId ?? null, playbackRequestId: lastReply?.requestId ?? null,
-        spokenPrefix: '', delivery: 'interrupted', reason }); }
-      catch { /* Session stays closed; no paid operation or replay can follow. */ }
-    }
-    send({ type: 'end', handoffData: JSON.stringify({ reason }) });
+export function createConversationRelay({ request, authToken, accountSid = null, greeting, coreFactory, send,
+  now = Date.now, schedule = setTimeout, unschedule = clearTimeout, log = (line) => console.log(JSON.stringify(line)) }) {
+  if (!verifyTwilioRequest(request, authToken, { websocket: true }) || typeof coreFactory !== 'function'
+    || typeof send !== 'function' || typeof greeting !== 'string' || !greeting) throw Error('relay_not_authorized');
+
+  let claims = null, core = null, ready = false, closed = false, ending = false;
+  let revision = 0, providerFailures = 0;
+  let inFlight = null;        // { requestId, superseded }
+  let pending = null;         // { text, promptAt } — newest words while a turn is in flight
+  let lastReply = null;       // { requestId, text, delivery, spokenPrefix }
+  let reported = null;        // requestId whose delivery Core already knows
+  let deadlineTimer = null, endTimer = null;
+  const latencies = [];
+
+  const emit = (message) => { if (!closed) send(message); };
+
+  function previousDelivery() {
+    if (!lastReply || reported === lastReply.requestId) return null;
+    return { requestId: lastReply.requestId, delivery: lastReply.delivery,
+      ...(lastReply.delivery === 'interrupted' && lastReply.spokenPrefix ? { spokenPrefix: lastReply.spokenPrefix } : {}) };
   }
-  async function run(text) {
-    const job = { controller: new AbortController(), epoch, submitted: false, reservation: null, accounted: false };
-    busy = job;
-    try {
-      const requestId = `${lease.callSid}:relay:${revision + 1}`; job.requestId = requestId;
-      const requestDigest = hash(JSON.stringify([lease.callSid, revision, text]));
-      const patches = callerFacts(text);
-      const factEvidence = Object.fromEntries(Object.keys(patches).map(key => [key, {
-        entity: 'caller', scope: 'current', verification: 'caller_asserted',
-        sourceRequestId: requestId, sourceTextSha256: hash(text), revision: revision + 1,
-        supersedesRevision: state?.factEvidence?.[key]?.revision ?? null,
-      }]));
-      const context = await backend.claimTurn({ callSid: lease.callSid, requestId, expectedRevision: revision,
-        requestDigest, expectedEpoch: job.epoch, text, callerFacts: patches, factEvidence });
-      if (context.repeated || context.callSid !== lease.callSid || context.requestId !== requestId || context.requestDigest !== requestDigest || context.epoch !== job.epoch || context.revision !== revision + 1 || !context.state?.facts || !Array.isArray(context.state.history)) throw Error('relay_readback_invalid');
-      revision = context.revision; state = clone(context.state);
-      if (closed || job.controller.signal.aborted || job.epoch !== epoch || now() >= lease.deadline) return;
-      job.reservation = await backend.reserve({ callSid: lease.callSid, requestId, revision,
-        maximumRequests: lease.maximumRequests, deadline: lease.deadline });
-      if (!job.reservation?.id || !job.reservation.pricingSnapshot || job.reservation.authorized !== true
-        || job.reservation.callSid !== lease.callSid || job.reservation.requestId !== requestId || job.reservation.revision !== revision) throw Error('relay_budget_denied');
-      if (closed || job.controller.signal.aborted || job.epoch !== epoch || now() >= lease.deadline) return;
-      if (++requests > lease.maximumRequests) throw Error('relay_request_limit');
-      const dispatch = await backend.claimDispatch({ callSid: lease.callSid, requestId, revision, reservationId: job.reservation.id, expectedEpoch: job.epoch });
-      if (dispatch?.claimed !== true || dispatch.providerRequests !== 1 || dispatch.requestId !== requestId || dispatch.reservationId !== job.reservation.id) throw Error('relay_dispatch_not_claimed');
-      if (closed || job.controller.signal.aborted || job.epoch !== epoch) return;
-      job.submitted = true;
-      const result = await model.generate({ text, facts: clone(state.facts), history: clone(state.history.slice(-8)),
-        factEvidence: clone(state.factEvidence ?? {}),
-        businessFacts: clone(state.businessFacts ?? {}),
-        requestId, signal: job.controller.signal, reservation: clone(job.reservation), attempt: clone(dispatch),
-        instruction: 'You are Emma. Start with the caller goal, remember their name and confirmed facts, answer naturally and concisely. Do not restart a questionnaire. Never invent mortgage figures, eligibility, rates or action status. Financial assertions need authorized tool evidence.' });
-      if (!result?.rawUsage) throw Error('relay_usage_unknown');
-      // Even a cancelled response can be billed. Settle authoritative raw usage
-      // before fencing its output; backend enforces pricing/token ceilings.
-      const settlement = await backend.settle({ reservationId: job.reservation.id, requestId, rawUsage: result.rawUsage });
-      if (settlement?.state !== 'settled' || settlement.reservationId !== job.reservation.id || settlement.requestId !== requestId || settlement.providerRequests !== 1) throw Error('relay_usage_unknown');
-      job.accounted = true;
-      if (closed || job.controller.signal.aborted || job.epoch !== epoch || now() >= lease.deadline) return;
-      if (!validText(result.text)) throw Error('relay_reply_invalid');
-      const approval = await backend.approveReply({ callSid: lease.callSid, requestId, revision,
-        text: result.text, facts: clone(state.facts), evidence: result.evidence ?? [] });
-      if (approval?.approved !== true || approval.text !== result.text || !Array.isArray(approval.receiptIds)) throw Error('relay_reply_not_grounded');
-      if (closed || job.controller.signal.aborted || job.epoch !== epoch || now() >= lease.deadline) return;
-      if (characters + result.text.length > lease.maximumCharacters) throw Error('relay_character_limit');
-      const committed = await backend.prepareReply({ callSid: lease.callSid, requestId, revision,
-        expectedEpoch: job.epoch, text: result.text, receiptIds: approval.receiptIds, delivery: 'prepared' });
-      if (committed?.revision !== revision || committed.requestId !== requestId || committed.epoch !== job.epoch) throw Error('relay_commit_unknown');
-      if (closed || job.controller.signal.aborted || job.epoch !== epoch || now() >= lease.deadline) return;
-      characters += result.text.length; lastReply = { requestId, revision, text: result.text };
-      // Only approved text reaches TTS. 'submitted' never means 'heard'.
-      await send({ type: 'text', token: result.text, last: true, interruptible: true, preemptible: true },
-        { signal: job.controller.signal, deadline: lease.deadline });
-      if (closed || job.controller.signal.aborted || job.epoch !== epoch || now() >= lease.deadline) return;
-      const delivered = await backend.markSubmitted({ callSid: lease.callSid, requestId, revision, expectedEpoch: job.epoch, delivery: 'submitted' });
-      if (delivered?.requestId !== requestId || !['submitted', 'interrupted'].includes(delivered.delivery)) throw Error('relay_send_readback_unknown');
-    } catch (error) {
-      if (error instanceof RelayPreSubmissionError) job.submitted = false;
-      await close(job.submitted && !job.accounted ? 'provider_outcome_unknown' : 'conversation_unavailable');
-    } finally {
-      if (job.reservation && !job.accounted) {
-        if (job.submitted) await backend.hold({ reservationId: job.reservation.id, reason: 'outcome_unknown' });
-        else await backend.release({ reservationId: job.reservation.id, reason: 'not_submitted' });
-      }
-      if (busy === job) busy = null;
-    }
-  }
-  async function receive(message) {
-    if (closed || now() >= lease.deadline) return close('deadline');
-    if (message?.type === 'setup') {
-      if (ready || busy || message.accountSid !== accountSid || message.callSid !== lease.callSid
-        || message.from !== lease.caller || message.customParameters?.session !== lease.session) return close('invalid_setup');
-      busy = { controller: new AbortController() };
+
+  async function finish(reason, line = null) {
+    if (ending || closed) return;
+    ending = true;
+    pending = null;
+    if (deadlineTimer) unschedule(deadlineTimer);
+    if (line) emit({ type: 'text', token: line, last: true, interruptible: false, preemptible: false });
+    const previous = previousDelivery();
+    if (core) {
       try {
-        const claimed = await backend.claimSession({ callSid: lease.callSid, session: lease.session,
-          caller: lease.caller, suiteId: lease.suiteId, deadline: lease.deadline });
-        if (closed || claimed?.claimed !== true || claimed?.revision !== 0 || claimed?.callSid !== lease.callSid || claimed?.suiteId !== lease.suiteId) return close('session_claim_denied');
-        state = clone(claimed.state); ready = true;
-      } catch { await close('session_claim_unknown'); }
-      finally { busy = null; }
+        const result = await core.close({ reason, previous });
+        if (previous) reported = previous.requestId;
+        log({ event: 'relay_call', reason, turns: revision, providerRequests: result.providerRequests,
+          settledUsd: result.settledUsd, heldUsd: result.heldUsd, reservedUsd: result.reservedUsd,
+          promptToTextP50Ms: percentile(latencies, 50), promptToTextP95Ms: percentile(latencies, 95),
+          promptToTextMaxMs: latencies.length ? Math.max(...latencies) : null, measuredTurns: latencies.length });
+      } catch (error) {
+        log({ event: 'relay_call', reason, closeRecorded: false, failure: error?.kind ?? 'unknown', ...(error?.detail ?? {}),
+          promptToTextP95Ms: percentile(latencies, 95), measuredTurns: latencies.length });
+      }
+    }
+    endTimer = schedule(() => {
+      if (!closed) send({ type: 'end', handoffData: JSON.stringify({ reason }) });
+      closed = true;
+    }, line ? speechMs(line) : 0);
+  }
+
+  async function runTurn(text, promptAt) {
+    const requestId = `${claims.callSid}:relay:${revision + 1}`;
+    const job = { requestId, superseded: false };
+    inFlight = job;
+    const previous = previousDelivery();
+    const sentAt = now();
+    let result;
+    try {
+      result = await core.turn({ requestId, expectedRevision: revision, utterance: text, previous });
+    } catch (error) {
+      inFlight = null;
+      log({ event: 'relay_turn', requestSeq: revision + 1, status: `core_${error?.kind ?? 'unknown'}`, ...(error?.detail ?? {}),
+        coreMs: now() - sentAt });
+      if (error?.kind === 'refused' && LIMIT_CODES.has(error.detail?.code)) return finish('limit_reached', RELAY_LINES.limit);
+      return finish(error?.kind === 'refused' ? 'core_refused' : 'core_outcome_unknown', RELAY_LINES.unavailable);
+    }
+    inFlight = null;
+    if (previous) reported = previous.requestId;
+    if (Number.isSafeInteger(result.revision) && result.revision > revision) revision = result.revision;
+    const coreMs = now() - sentAt;
+    const base = { event: 'relay_turn', requestSeq: revision, status: result.status, coreMs, core: result.timings,
+      httpStatus: result.diagnostics?.httpStatus, errorType: result.diagnostics?.errorType,
+      providerRequestId: result.diagnostics?.providerRequestId, diagnosticCode: result.diagnostics?.code };
+
+    if (result.status === 'refused') {
+      log({ ...base, code: result.code });
+      return finish(LIMIT_CODES.has(result.code) ? 'limit_reached' : 'core_refused',
+        LIMIT_CODES.has(result.code) ? RELAY_LINES.limit : RELAY_LINES.unavailable);
+    }
+    if (result.status !== 'answered' && result.status !== 'provider_failed') {
+      // provider_unknown, accounting_unknown, repeated: an outcome nobody
+      // knows. Stop; the hold is reconciled later, never retried here.
+      log(base);
+      return finish('provider_outcome_unknown', RELAY_LINES.unavailable);
+    }
+
+    let line = null, kind = null;
+    if (result.status === 'answered' && result.reply?.text) {
+      line = result.reply.text; kind = result.reply.kind;
+      lastReply = { requestId, text: line, delivery: 'submitted', spokenPrefix: null };
+    } else if (result.status === 'answered') {
+      lastReply = { requestId, text: '', delivery: 'discarded', spokenPrefix: null };
+      kind = 'withheld';
+    } else {
+      providerFailures += 1;
+      if (providerFailures > 1) { log({ ...base, providerFailures }); return finish('provider_failed_twice', RELAY_LINES.unavailable); }
+      line = RELAY_LINES.retry; kind = 'provider_retry_prompt';
+    }
+
+    if (job.superseded || ending || closed) {
+      // The caller kept talking; this answer is no longer to what they said.
+      if (lastReply?.requestId === requestId) lastReply.delivery = 'discarded';
+      log({ ...base, replyKind: kind, delivered: false, superseded: job.superseded });
+    } else if (line) {
+      emit({ type: 'text', token: line, last: true, interruptible: true, preemptible: true });
+      const promptToTextMs = now() - promptAt;
+      latencies.push(promptToTextMs);
+      log({ ...base, replyKind: kind, delivered: true, promptToTextMs, characters: line.length });
+    } else {
+      log({ ...base, replyKind: kind, delivered: false });
+    }
+    if (pending && !ending && !closed) {
+      const next = pending; pending = null;
+      return runTurn(next.text, next.promptAt);
+    }
+  }
+
+  async function receive(message) {
+    if (closed || ending) return;
+    if (message?.type === 'setup') {
+      if (ready || core) return finish('invalid_setup');
+      const params = message.customParameters || {};
+      claims = validateRelaySession(params.session, message.callSid, authToken, now());
+      if (!claims || params.callSid !== message.callSid || message.from !== claims.caller
+        || (accountSid && message.accountSid !== accountSid)) {
+        claims = null;
+        return finish('invalid_setup');
+      }
+      try {
+        core = coreFactory(claims.callSid);
+        const claimed = await core.claimSession({ suiteId: claims.suiteId, greeting });
+        if (claimed?.claimed !== true || claimed.suiteId !== claims.suiteId) throw Object.assign(Error('claim'), { kind: 'refused' });
+      } catch (error) {
+        log({ event: 'relay_session', status: 'claim_failed', failure: error?.kind ?? 'unknown', ...(error?.detail ?? {}) });
+        core = null; // nothing was claimed, so there is nothing to close
+        return finish('session_claim_failed', RELAY_LINES.unavailable);
+      }
+      ready = true;
+      deadlineTimer = schedule(() => { void finish('deadline', RELAY_LINES.limit); }, Math.max(0, claims.deadline - now() - 8_000));
+      log({ event: 'relay_session', status: 'claimed' });
       return;
     }
-    if (!ready) return close('setup_required');
+    if (!ready) return finish('setup_required');
     if (message?.type === 'interrupt') {
-      if (typeof message.utteranceUntilInterrupt !== 'string' || message.utteranceUntilInterrupt.length > 4000
-        || !Number.isFinite(message.durationUntilInterruptMs) || message.durationUntilInterruptMs < 0) return close('invalid_interrupt');
-      const previousEpoch = epoch; epoch++; busy?.controller.abort();
-      // The supplied prefix is only a playback report. Never promote its text
-      // to caller facts, financial evidence, or a fully delivered response.
-      const prefix = lastReply?.text.startsWith(message.utteranceUntilInterrupt) ? message.utteranceUntilInterrupt : '';
-      try {
-        const fence = await backend.interrupt({ callSid: lease.callSid, revision, expectedEpoch: previousEpoch, epoch,
-          fenceRequestId: busy?.requestId ?? null, playbackRequestId: lastReply?.requestId ?? null,
-          spokenPrefix: prefix, delivery: 'interrupted' });
-        if (fence?.epoch !== epoch) await close('interrupt_fence_unknown');
-      } catch { await close('interrupt_fence_unknown'); }
+      // A playback report from Twilio. It never becomes caller speech.
+      if (lastReply && lastReply.delivery === 'submitted' && reported !== lastReply.requestId) {
+        const prefix = typeof message.utteranceUntilInterrupt === 'string' ? message.utteranceUntilInterrupt.trim() : '';
+        lastReply.delivery = 'interrupted';
+        lastReply.spokenPrefix = prefix && lastReply.text.startsWith(prefix) ? prefix : null;
+      }
       return;
     }
     if (message?.type === 'prompt') {
-      if (message.last !== true) return; // No speculative paid generation.
-      if (!validText(message.voicePrompt)) return close('invalid_prompt');
-      const text = message.voicePrompt.trim();
-      // Relay exposes no stable prompt event ID. Fail closed on an identical
-      // final anywhere in this exclusive call; never buy a delayed replay.
-      const finalDigest = hash(text); if (finalPrompts.has(finalDigest)) return;
-      if (busy) return close('overlapping_turn');
-      if (revision >= lease.maximumTurns) return close('turn_limit');
-      finalPrompts.add(finalDigest);
-      return run(text);
+      if (message.last !== true) return; // partials never buy anything
+      const text = typeof message.voicePrompt === 'string' ? message.voicePrompt.trim() : '';
+      if (!text) return;
+      if (text.length > 4000) return finish('invalid_prompt', RELAY_LINES.unavailable);
+      const promptAt = now();
+      if (GOODBYE.test(text) && text.split(/\s+/).length <= 8) {
+        if (inFlight) inFlight.superseded = true;
+        return finish('caller_goodbye', RELAY_LINES.goodbye);
+      }
+      if (inFlight) {
+        inFlight.superseded = true;
+        pending = pending ? { text: `${pending.text} ${text}`, promptAt: pending.promptAt } : { text, promptAt };
+        return;
+      }
+      return runTurn(text, promptAt);
     }
-    if (message?.type === 'error') return close('relay_error');
-    if (message?.type === 'dtmf') return close('dtmf_handoff');
-    return close('unknown_message');
+    if (message?.type === 'dtmf') return; // keypad input is not part of this pilot
+    if (message?.type === 'error') {
+      log({ event: 'relay_twilio_error', description: String(message.description ?? '').replace(/\d{5,}/g, '<number>').slice(0, 120) });
+      return finish('twilio_error');
+    }
+    return finish('unknown_message');
   }
-  return { receive, close, snapshot: () => ({ ready, closed, revision, requests, characters, busy: Boolean(busy), state: clone(state) }) };
+
+  function socketClosed() {
+    if (closed) return;
+    void finish('socket_closed').then(() => { closed = true; if (endTimer) unschedule(endTimer); });
+  }
+
+  return {
+    receive,
+    socketClosed,
+    snapshot: () => ({ ready, closed, ending, revision, providerFailures, inFlight: Boolean(inFlight),
+      pending: pending?.text ?? null, lastReply: lastReply && { ...lastReply }, latencies: [...latencies] }),
+  };
 }

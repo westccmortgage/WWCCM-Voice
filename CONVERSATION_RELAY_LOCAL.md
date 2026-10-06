@@ -1,4 +1,77 @@
-# Dormant Emma ConversationRelay candidate
+# Emma on Twilio ConversationRelay — current state
+
+Branch `claude/emma-relay` (on top of `codex/emma-conversation-relay-local`, c75ef9b).
+Core counterpart: `westccmortgage/measured-decision-ai`, migration
+`20261006120000_core_v2_voice_relay.sql` and function `core-v2-voice-relay`.
+Nothing here is deployed, armed or wired to a phone number. `main` and the
+Render service are unchanged. The `emma-synthetic-20261006-0457:S1` $0.036
+unknown hold is untouched.
+
+## Shape
+
+```
+caller ─PSTN─ Twilio ConversationRelay (STT, TTS, barge-in)
+                │  text over WebSocket (/relay)
+                ▼
+        Render server.mjs  (VOICE_TRANSPORT=relay)
+                │  ONE signed request per final caller utterance
+                ▼
+        Supabase core-v2-voice-relay
+          begin    claim revision, count dispatch, reserve priced ceiling
+          model    one plain Messages request (existing registry and gates)
+          clear    deterministic: figures, rate quotes, eligibility, actions
+          complete settle | release | hold; record what may be said
+```
+
+- `/voice` is unchanged as a URL. In relay mode it returns ConversationRelay
+  TwiML; the disclosures are Twilio's `welcomeGreeting`, not interruptible.
+  The existing admission still admits the call; Core's `claim_session` binds
+  it to exactly one stream.
+- Render holds no model key, only one new HMAC secret shared with
+  `core-v2-voice-relay`. The prototype's backend/text-model modules are
+  replaced: the model is chosen by `CORE_V2_RELAY_PROVIDER_REGISTRY` in Core.
+
+## Phone behaviour
+
+| Situation | What Emma does | Money |
+| --- | --- | --- |
+| Ordinary turn | Speaks the cleared reply | settled once |
+| Reply states an unsourced figure, a rate quote, eligibility or a completed action | Reason-specific line; the conversation continues | settled |
+| Caller interrupts | Twilio stops TTS; next request records `interrupted` + heard prefix | — |
+| Caller speaks while a reply is prepared | Old reply discarded unheard; new words answered next; never two requests in flight | settled |
+| Same words twice ("yes", "yes") | Two real turns (no text dedupe) | each settled |
+| Redelivered request (same request id) | Core returns `repeated`, no model call, call stops | none |
+| Known provider refusal (4xx, 429, 529) | Asks the caller to repeat, once; a second ends the call | released |
+| Outcome unknown (transport fault, 5xx, Core > 9 s) | Apology line, call ends, nothing retried | held |
+| Turn / request / budget / deadline limit | Polite limit line, call ends | — |
+| Goodbye | Goodbye line, no model request, `end` after the line | — |
+
+Per-turn diagnostics in Render and Core logs: HTTP status, provider error
+type, provider request id, stage, scrubbed reason, timings (begin / model /
+complete, prompt→text). Never caller speech, reply text, keys or raw bodies.
+
+## Verified offline (no network, no paid provider)
+
+- Core: 8 unit tests; PostgreSQL 16 migration assertions; end-to-end run of
+  the real repository through the restricted runtime login; strict tsc.
+- Render: 72 tests pass (9 existing TODO), including the relay protocol and a
+  fixed HMAC vector produced by Core's verifier.
+- `scripts/relay-offline-acceptance.mjs` (real server.mjs + real Core handler
+  + simulated Twilio + scripted model): 11/11 scenarios pass. With a fixed
+  700 ms model delay, prompt→text p95 was 716 ms (system overhead ~16 ms).
+  That excludes all real network and Twilio speech time: it is not a latency
+  result.
+
+## Not proven until a real call
+
+Conversation quality with the real model, phone first-audio latency, Twilio
+account eligibility and tariff for ConversationRelay, and the real
+Render→Supabase→Anthropic round trip.
+
+---
+
+# Previous prototype notes (c75ef9b, kept for history)
+
 
 This branch is LOCAL ONLY. `server.mjs` does not import these modules, return new TwiML, or expose a new route. No provider call, webhook/config/deployment change, key entry or paid-service enablement has occurred. Existing failed campaign is closed. Its `emma-synthetic-20261006-0457:S1` $0.036 unknown hold must remain untouched.
 

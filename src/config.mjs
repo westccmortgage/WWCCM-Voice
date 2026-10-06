@@ -50,6 +50,21 @@ export const config = {
   // Required: all webhook and WebSocket traffic is rejected when absent.
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
 
+  // Which voice path /voice answers with. `media-stream` is the existing
+  // Deepgram/ElevenLabs bridge and stays the default. `relay` returns Twilio
+  // ConversationRelay TwiML: Twilio handles speech in and out, and each final
+  // caller utterance becomes one signed request to Core's relay door.
+  transport: (process.env.VOICE_TRANSPORT || 'media-stream').toLowerCase(),
+  relay: {
+    url: process.env.VOICE_RELAY_URL || '',
+    keyId: process.env.VOICE_RELAY_KEY_ID || '',
+    secret: process.env.VOICE_RELAY_HMAC_SECRET || '',
+    accountSid: process.env.TWILIO_ACCOUNT_SID || '',
+    ttsProvider: process.env.VOICE_RELAY_TTS_PROVIDER || '',
+    voice: process.env.VOICE_RELAY_VOICE || '',
+    turnTimeoutMs: boundedInteger(process.env.VOICE_RELAY_TURN_TIMEOUT_MS, 9_000, { min: 3_000, max: 15_000 }),
+  },
+
   // A test release is a separate admission mode, not merely an enabled
   // public phone number. It admits only the owner's exact E.164 caller and
   // bounds the complete suite across webhook and Core requests.

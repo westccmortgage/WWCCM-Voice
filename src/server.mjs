@@ -25,6 +25,8 @@ import { buildServiceStatus, canAcceptTraffic } from './readiness.mjs';
 import { beginBrainRequest, endCall, finishBrainRequest } from './call-lifecycle.mjs';
 import { reserveSpeechCharacters } from './usage-limits.mjs';
 import { createCallAdmission } from './admission.mjs';
+import { createConversationRelay } from './conversation-relay.mjs';
+import { createRelayCoreClient } from './relay-core-client.mjs';
 import {
   appendAssistantHistory,
   beginEnding,
@@ -106,6 +108,10 @@ app.post('/voice', async (req, res) => {
     maximumTtsCharacters: Math.min(admitted.maximumTtsCharacters, config.limits.maxTtsCharacters),
   });
   if (!session) return res.status(503).send('Unavailable');
+  if (config.transport === 'relay') {
+    res.type('text/xml').send(relayTwiml(host, callSid, session));
+    return;
+  }
   const lang = config.language;
   const twiml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
@@ -121,8 +127,35 @@ app.post('/voice', async (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
+const escapeXml = (value) => String(value).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]);
+
+// The opening disclosures are Twilio's welcome greeting: spoken at once, not
+// interruptible, and recorded by Core as Emma's opening line.
+function relayGreeting() {
+  const d = disclosuresFor('en');
+  return `${d.recording} ${d.ai} ${d.greeting}`;
+}
+
+function relayTwiml(host, callSid, session) {
+  const attributes = [
+    ['url', `wss://${host}/relay`],
+    ['welcomeGreeting', relayGreeting()],
+    ['welcomeGreetingInterruptible', 'none'],
+    ['language', 'en-US'],
+    ['interruptible', 'speech'],
+    ['ignoreBackchannel', 'true'],
+    ...(config.relay.ttsProvider ? [['ttsProvider', config.relay.ttsProvider]] : []),
+    ...(config.relay.voice ? [['voice', config.relay.voice]] : []),
+  ].map(([name, value]) => `${name}="${escapeXml(value)}"`).join(' ');
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><ConversationRelay ${attributes}>`
+    + `<Parameter name="callSid" value="${escapeXml(callSid)}"/>`
+    + `<Parameter name="session" value="${escapeXml(session)}"/>`
+    + `</ConversationRelay></Connect></Response>`;
+}
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
+const relayWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
 server.on('upgrade', (req, socket, head) => {
   const reject = (status, reason) => {
@@ -136,11 +169,41 @@ server.on('upgrade', (req, socket, head) => {
   } catch {
     return reject(400, 'Bad Request');
   }
-  if (pathname !== '/media') return reject(404, 'Not Found');
+  const expected = config.transport === 'relay' ? '/relay' : '/media';
+  if (pathname !== expected) return reject(404, 'Not Found');
   if (!verifyTwilioRequest(req, config.twilioAuthToken, { websocket: true })) {
     return reject(403, 'Forbidden');
   }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  const target = config.transport === 'relay' ? relayWss : wss;
+  target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
+});
+
+relayWss.on('connection', (ws, req) => {
+  let relay;
+  try {
+    relay = createConversationRelay({
+      request: req,
+      authToken: config.twilioAuthToken,
+      accountSid: config.relay.accountSid || null,
+      greeting: relayGreeting(),
+      coreFactory: (callSid) => createRelayCoreClient({ url: config.relay.url, keyId: config.relay.keyId,
+        secret: config.relay.secret, callSid, turnTimeoutMs: config.relay.turnTimeoutMs }),
+      send: (message) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message)); },
+    });
+  } catch {
+    ws.close(1008, 'unauthorized');
+    return;
+  }
+  ws.on('message', (data) => {
+    let message;
+    try { message = JSON.parse(String(data)); } catch { return; }
+    relay.receive(message).catch((error) => {
+      console.error(JSON.stringify({ event: 'relay_error', reason: error?.name ?? 'Error' }));
+      ws.close(1011, 'relay_error');
+    });
+  });
+  ws.on('close', () => relay.socketClosed());
+  ws.on('error', () => relay.socketClosed());
 });
 
 wss.on('connection', (ws) => {
