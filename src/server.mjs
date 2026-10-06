@@ -27,7 +27,8 @@ import { reserveSpeechCharacters } from './usage-limits.mjs';
 import { createCallAdmission, validLease } from './admission.mjs';
 import { createConversationRelay } from './conversation-relay.mjs';
 import { createRelayCoreClient } from './relay-core-client.mjs';
-import { limitRelayCall } from './twilio-call-limit.mjs';
+import { callLimitDiagnostic } from './twilio-call-limit.mjs';
+import { createRelayAnswerBridge } from './relay-answer-bridge.mjs';
 import {
   appendAssistantHistory,
   beginEnding,
@@ -73,6 +74,27 @@ app.get('/', (_req, res) => {
 });
 
 // --- Twilio voice webhook: return TwiML that starts the media stream ---------
+const relayAnswerBridge = createRelayAnswerBridge();
+app.post('/voice-connected', async (req, res) => {
+  if (!canAcceptTraffic(config) || config.transport !== 'relay' || config.admission.mode !== 'test'
+    || !verifyTwilioRequest(req, config.twilioAuthToken)
+    || String(req.body?.From || '') !== config.admission.allowedCaller) {
+    return res.type('text/xml').send('<Response><Hangup/></Response>');
+  }
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  if (!/^[a-z0-9.-]+(?::\d{1,5})?$/i.test(String(host || ''))) return res.status(400).send('Bad Request');
+  const callSid = String(req.body?.CallSid || '');
+  try {
+    const session = await relayAnswerBridge.connect({ ticket: String(req.query?.ticket || ''), callSid,
+      caller: String(req.body?.From || ''), callStatus: String(req.body?.CallStatus || ''),
+      accountSid: config.relay.accountSid, webhookAccountSid: String(req.body?.AccountSid || ''),
+      authToken: config.twilioAuthToken });
+    return res.type('text/xml').send(relayTwiml(host, callSid, session));
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'relay_call_limit', status: 'unconfirmed', ...callLimitDiagnostic(error) }));
+    return res.type('text/xml').send('<Response><Hangup/></Response>');
+  }
+});
 app.post('/voice', async (req, res) => {
   if (!canAcceptTraffic(config)) {
     console.error('[voice] required configuration is missing; rejecting request');
@@ -90,14 +112,6 @@ app.post('/voice', async (req, res) => {
   }
   if (config.transport === 'relay') {
     if (config.admission.mode !== 'test' || String(req.body?.From || '') !== config.admission.allowedCaller) {
-      return res.type('text/xml').send('<Response><Hangup/></Response>');
-    }
-    try {
-      await limitRelayCall({ callSid, accountSid: config.relay.accountSid,
-        webhookAccountSid: String(req.body?.AccountSid || ''), authToken: config.twilioAuthToken,
-        maximumSeconds: config.limits.maxCallSeconds });
-    } catch {
-      console.error(JSON.stringify({ event: 'relay_call_limit', status: 'unconfirmed' }));
       return res.type('text/xml').send('<Response><Hangup/></Response>');
     }
   }
@@ -125,7 +139,12 @@ app.post('/voice', async (req, res) => {
   });
   if (!session) return res.status(503).send('Unavailable');
   if (config.transport === 'relay') {
-    res.type('text/xml').send(relayTwiml(host, callSid, session));
+    try {
+      res.type('text/xml').send(relayAnswerBridge.begin({ callSid, caller: admitted.caller,
+        session, deadline, repeated: admitted.repeated }));
+    } catch {
+      res.type('text/xml').send('<Response><Hangup/></Response>');
+    }
     return;
   }
   const lang = config.language;

@@ -81,11 +81,16 @@ const coreBodies = [];
 
 // --- Intercept exactly two URLs ----------------------------------------------
 const realFetch = globalThis.fetch;
+const inProgressCalls = new Set();
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input instanceof URL ? input.href : input);
   if (/^https:\/\/api.twilio.com\/2010-04-01\/Accounts\/AC0{32}\/Calls\/CA[a-f0-9]{32}\.json$/.test(url)) {
-    assert.equal(init.body, 'TimeLimit=105');
-    return new Response(JSON.stringify({ sid: url.split('/').at(-1).slice(0, -5), account_sid: 'AC' + '0'.repeat(32) }));
+    const callSid = url.split('/').at(-1).slice(0, -5);
+    if (!inProgressCalls.has(callSid)) return new Response(JSON.stringify({ code: 21220,
+      message: 'Call is not in-progress. Cannot update.' }), { status: 400 });
+    const seconds = Number(new URLSearchParams(init.body).get('TimeLimit'));
+    assert.ok(seconds >= 30 && seconds <= 100);
+    return new Response(JSON.stringify({ sid: callSid, account_sid: 'AC' + '0'.repeat(32) }));
   }
   if (url === ADMISSION_URL) throw new Error('relay mode must not use the Netlify admission endpoint');
   if (url === RELAY_URL) {
@@ -110,13 +115,24 @@ await new Promise((resolve) => setTimeout(resolve, 200));
 // --- Simulated Twilio --------------------------------------------------------
 async function placeCall() {
   const callSid = `CA${randomBytes(16).toString('hex')}`;
-  const params = { AccountSid: 'AC' + '0'.repeat(32), CallSid: callSid, From: OWNER, To: '+14243041032' };
+  const params = { AccountSid: 'AC' + '0'.repeat(32), CallSid: callSid, From: OWNER, To: '+14243041032', CallStatus: 'ringing' };
   const signature = twilioSignature(`https://${HOST}/voice`, params, AUTH_TOKEN);
   const response = await realFetch(`http://127.0.0.1:${PORT}/voice`, { method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-host': HOST, 'x-forwarded-proto': 'https', 'x-twilio-signature': signature },
     body: new URLSearchParams(params) });
   assert.equal(response.status, 200);
-  const twiml = await response.text();
+  const bootstrap = await response.text();
+  assert.match(bootstrap, /<Say>Connecting\.<\/Say>/);
+  assert.doesNotMatch(bootstrap, /ConversationRelay/);
+  const path = bootstrap.match(/<Redirect method="POST">([^<]+)<\/Redirect>/)[1];
+  inProgressCalls.add(callSid); // Simulated execution of Say answers the call.
+  const connectedParams = { ...params, CallStatus: 'in-progress' };
+  const connected = await realFetch(`http://127.0.0.1:${PORT}${path}`, { method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-host': HOST,
+      'x-forwarded-proto': 'https', 'x-twilio-signature': twilioSignature(`https://${HOST}${path}`, connectedParams, AUTH_TOKEN) },
+    body: new URLSearchParams(connectedParams) });
+  assert.equal(connected.status, 200);
+  const twiml = await connected.text();
   const attribute = (name) => twiml.match(new RegExp(`${name}="([^"]*)"`))?.[1];
   const session = twiml.match(/name="session" value="([^"]+)"/)[1];
   const socket = new WebSocket(`ws://127.0.0.1:${PORT}/relay`, { headers: { 'x-forwarded-host': HOST,

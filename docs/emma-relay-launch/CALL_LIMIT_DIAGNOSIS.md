@@ -1,0 +1,25 @@
+# First failed pilot: TimeLimit response contract and local diagnostics
+
+Deployed base: Voice main 4d0d921435a980866a1ec84a4737e0a7525ac8f6. Render reported `relay_call_limit/unconfirmed` at 18:53:01.556 and 18:53:09.291 UTC on October 6. Core admissions and model turns remained zero. The runtime was disabled after the first observed failure. The later Twilio Inspector readback supplied by the coordinator identified two distinct incoming calls at those times.
+
+## Contract checked against official documentation
+
+[Twilio Call resource: Update a Call](https://www.twilio.com/docs/voice/api/call-resource#update-a-call-resource) documents POST to the individual Call resource, form parameter `TimeLimit` in seconds, and account/configuration dependent constraints. Its REST response examples contain `sid` and `account_sid`; the resource schema/examples do not document a returned `time_limit` echo. The adapter never required that echo. A matching successful JSON response without it passes both the old and new code, as the offline fixture demonstrates.
+
+For HTTP success, the deployed adapter can still reject a response that fails during body reading, exceeds 16KiB, is invalid JSON, or has missing/mismatched `sid` or `account_sid`. Before HTTP success, it can reject invalid local binding, transport failure/timeout, or any non-success HTTP status. The deployed catch collapsed all of these into the same event.
+
+The release coordinator subsequently supplied the exact existing Twilio Request Inspector receipt: HTTP 400, code 21220, Call is not in-progress. Cannot update. Both incoming calls were NoAnswer, duration 0, price not yet shown, and /voice returned HTTP 200 with Hangup. This proves the Call Update was attempted before Twilio answered the inbound call. It is not a response-echo bug or a proved 401/timeout. This receipt was relayed by the coordinator, not fetched here with runtime credentials.
+
+## Local candidate only
+
+Keep the same endpoint, existing credential, TimeLimit value, 5-second deadline, single attempt, exact account/call binding and Hangup-before-Core ordering. Add code-owned failure stage/reason/type, HTTP status, five-digit numeric Twilio error code, and optional strictly shaped `RQ` + 32 hex request ID. Never log exception text, arbitrary error names, response bodies, headers, credentials, phone numbers, or account/call IDs. The response is now read with a streaming 16KiB bound rather than materialized before its size check.
+
+The local protocol candidate now makes durable Core admission first (no model request), then returns a short Say plus Redirect, without Connect or Call Update. It issues an opaque process-local, 10-second, single-use redirect ticket. The signed redirect must match owner/call, have CallStatus=in-progress and consume that ticket before dispatch. Only after one confirmed Call Update does it return Connect. The limit is conservatively shortened by elapsed admission time and the five-second API deadline; the original admission/session deadline stays unchanged. Core counts this bootstrap against the three-call suite even if setup fails. Repeated durable admission cannot create a new bootstrap; after restart the old ticket fails closed. No retry, fallback bypass, deployment or reactivation is included.
+
+Remaining risk: Say answers before Call Update can be installed. During this brief bootstrap the carrier-side TimeLimit is not yet installed. Missing/slow callback or TTS must rely on Twilio's own TwiML/webhook failure behavior until Hangup; the local 10-second ticket bounds callback acceptance but cannot itself terminate a carrier call when Render is unreachable. Therefore the candidate does NOT yet prove a strict 105-second whole-call cap across every pre-limit failure. Do not release by treating this risk as accepted. Account-level failure timings/fallback behavior and the extra Say/setup tariff need verified all-inclusive budgeting and explicit post-failure review before a retry. Connect/ConversationRelay docs have no timeLimit attribute; adding one would not fix the gap.
+
+## Verification and next evidence
+
+Full Voice suite 76 pass, 9 existing TODO, zero failures after `npm ci --offline` from external cache; focused bootstrap/adapter suite 4/4 and diff check passed. Regressions cover accepted/ringing -> in-progress order, exact mocked 21220, REST success without time_limit, mock HTTP 401/code 20003, timeout, invalid JSON, oversized body, identity mismatch, account mismatch, expiration, restart and no second dispatch. These mocked cases are not live receipts. The existing local acceptance harness now emulates a 21220 refusal before answer and follows the signed redirect after answer.
+
+Before any retry, reconcile actual Twilio billing and close the pre-limit failure cap gap described above. Any release and subsequent owner retry require separate post-failure approval. The previous $0.036 unknown hold remains untouched. Local branch: codex/emma-call-limit-diagnostics.
