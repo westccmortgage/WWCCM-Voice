@@ -76,6 +76,13 @@ export function verifyCallSession(token, expectedCallSid, authToken, now = Date.
   return Boolean(callSessionClaims(token, expectedCallSid, authToken, now));
 }
 
+export function validateRelaySession(token, expectedCallSid, authToken, now = Date.now()) {
+  const claims = callSessionClaims(token, expectedCallSid, authToken, now);
+  return claims ? { callSid: claims.callSid, caller: claims.caller, suiteId: claims.suiteId,
+    answeredAt: claims.answeredAt, deadline: claims.deadline, maximumTurns: claims.maximumTurns,
+    maximumRequests: claims.maximumBrainRequests, maximumCharacters: claims.maximumTtsCharacters } : null;
+}
+
 export function validateStartIdentity(msg, authToken, now = Date.now()) {
   const streamSid = String(msg?.start?.streamSid || msg?.streamSid || '');
   const callSid = String(msg?.start?.callSid || '');

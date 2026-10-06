@@ -14,12 +14,25 @@ export function buildReadiness(config) {
   const present = (value) => typeof value === 'string' && value.trim().length > 0;
   if (config.runtimeEnabled !== true) missing.push('VOICE_RUNTIME_ENABLED');
   if (!present(config.twilioAuthToken)) missing.push('TWILIO_AUTH_TOKEN');
-  if (!present(config.voiceTurnUrl)) missing.push('VOICE_TURN_URL');
-  if (!present(config.voiceSharedSecret)) missing.push('VOICE_SHARED_SECRET');
+  const transport = config.transport || 'media-stream';
+  if (transport !== 'media-stream' && transport !== 'relay') missing.push('VOICE_TRANSPORT');
+  if (transport !== 'relay' && !present(config.voiceTurnUrl)) missing.push('VOICE_TURN_URL');
+  if (transport !== 'relay' && !present(config.voiceSharedSecret)) missing.push('VOICE_SHARED_SECRET');
+  if (transport === 'relay') {
+    try {
+      const url = new URL(config.relay?.url || '');
+      if (url.protocol !== 'https:' || url.pathname !== '/functions/v1/core-v2-voice-relay'
+        || !url.hostname.endsWith('.supabase.co')) missing.push('VOICE_RELAY_URL');
+    } catch { missing.push('VOICE_RELAY_URL'); }
+    if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(config.relay?.keyId || '')) missing.push('VOICE_RELAY_KEY_ID');
+    if (String(config.relay?.secret || '').length < 32) missing.push('VOICE_RELAY_HMAC_SECRET');
+  }
   const admission = config.admission || {};
   if (admission.mode === 'test') {
     if (!/^\+[1-9]\d{7,14}$/.test(admission.allowedCaller || '')) missing.push('VOICE_TEST_ALLOWED_CALLER');
-    if (!present(admission.url)) missing.push('VOICE_ADMISSION_URL');
+    if (transport === 'relay') {
+      // Admission goes through the signed Core relay door in this mode.
+    } else if (!present(admission.url)) missing.push('VOICE_ADMISSION_URL');
     else try {
       const url = new URL(admission.url);
       if (url.href !== 'https://walletwccm.com/api/voice-admission') missing.push('VOICE_ADMISSION_URL');
@@ -28,7 +41,9 @@ export function buildReadiness(config) {
     missing.push('VOICE_ADMISSION_MODE');
   }
   const provider = config.speech?.provider || 'legacy';
-  if (provider === 'cloudflare-workers-ai') {
+  if (transport === 'relay') {
+    // Twilio performs speech recognition and synthesis on this path.
+  } else if (provider === 'cloudflare-workers-ai') {
     if (!present(config.speech?.cloudflare?.accountId)) missing.push('CLOUDFLARE_ACCOUNT_ID');
     if (!present(config.speech?.cloudflare?.gatewayId)) missing.push('CLOUDFLARE_AI_GATEWAY_ID');
     if (!present(config.speech?.cloudflare?.gatewayToken)) missing.push('CLOUDFLARE_AI_GATEWAY_TOKEN');
