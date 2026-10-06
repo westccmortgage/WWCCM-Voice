@@ -132,8 +132,8 @@ export function createConversationRelay({ request, authToken, accountSid = null,
       kind = 'withheld';
     } else {
       providerFailures += 1;
-      if (providerFailures > 1) { log({ ...base, providerFailures }); return finish('provider_failed_twice', RELAY_LINES.unavailable); }
-      line = RELAY_LINES.retry; kind = 'provider_retry_prompt';
+      log({ ...base, providerFailures });
+      return finish('provider_failed', RELAY_LINES.unavailable);
     }
 
     if (job.superseded || ending || closed) {

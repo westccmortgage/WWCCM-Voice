@@ -19,6 +19,9 @@ export function buildReadiness(config) {
   if (transport !== 'relay' && !present(config.voiceTurnUrl)) missing.push('VOICE_TURN_URL');
   if (transport !== 'relay' && !present(config.voiceSharedSecret)) missing.push('VOICE_SHARED_SECRET');
   if (transport === 'relay') {
+    if (!/^AC[a-f0-9]{32}$/i.test(config.relay?.accountSid || '')) missing.push('TWILIO_ACCOUNT_SID');
+    if (!Number.isInteger(config.limits?.maxCallSeconds) || config.limits.maxCallSeconds > 105
+      || config.limits.maxCallSeconds < 30) missing.push('MAX_CALL_SECONDS');
     try {
       const url = new URL(config.relay?.url || '');
       if (url.protocol !== 'https:' || url.pathname !== '/functions/v1/core-v2-voice-relay'

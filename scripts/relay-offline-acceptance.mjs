@@ -28,6 +28,7 @@ const PORT = 18_000 + Math.floor(Math.random() * 1000);
 const RELAY_URL = 'https://hbqlhplgqwuesrovbiye.supabase.co/functions/v1/core-v2-voice-relay';
 const ADMISSION_URL = 'https://walletwccm.com/api/voice-admission';
 Object.assign(process.env, {
+  TWILIO_ACCOUNT_SID: 'AC' + '0'.repeat(32), MAX_CALL_SECONDS: '105',
   PORT: String(PORT), VOICE_RUNTIME_ENABLED: 'true', VOICE_ADMISSION_MODE: 'test', VOICE_TEST_ALLOWED_CALLER: OWNER,
   VOICE_ADMISSION_URL: ADMISSION_URL, VOICE_SHARED_SECRET: SHARED, TWILIO_AUTH_TOKEN: AUTH_TOKEN,
   VOICE_TRANSPORT: 'relay', VOICE_RELAY_URL: RELAY_URL, VOICE_RELAY_KEY_ID: 'render-relay', VOICE_RELAY_HMAC_SECRET: RELAY_SECRET,
@@ -82,6 +83,10 @@ const coreBodies = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input instanceof URL ? input.href : input);
+  if (/^https:\/\/api.twilio.com\/2010-04-01\/Accounts\/AC0{32}\/Calls\/CA[a-f0-9]{32}\.json$/.test(url)) {
+    assert.equal(init.body, 'TimeLimit=105');
+    return new Response(JSON.stringify({ sid: url.split('/').at(-1).slice(0, -5), account_sid: 'AC' + '0'.repeat(32) }));
+  }
   if (url === ADMISSION_URL) throw new Error('relay mode must not use the Netlify admission endpoint');
   if (url === RELAY_URL) {
     coreBodies.push(JSON.parse(init.body));
@@ -105,7 +110,7 @@ await new Promise((resolve) => setTimeout(resolve, 200));
 // --- Simulated Twilio --------------------------------------------------------
 async function placeCall() {
   const callSid = `CA${randomBytes(16).toString('hex')}`;
-  const params = { CallSid: callSid, From: OWNER, To: '+14243041032' };
+  const params = { AccountSid: 'AC' + '0'.repeat(32), CallSid: callSid, From: OWNER, To: '+14243041032' };
   const signature = twilioSignature(`https://${HOST}/voice`, params, AUTH_TOKEN);
   const response = await realFetch(`http://127.0.0.1:${PORT}/voice`, { method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-host': HOST, 'x-forwarded-proto': 'https', 'x-twilio-signature': signature },
@@ -277,16 +282,14 @@ await scenario('9 goodbye: polite close, no model request, end after the line', 
   call.close();
 });
 
-await scenario('10 provider refusal: a known 400 asks the caller to repeat and the call continues', async () => {
+await scenario('10 first known provider refusal stops the call without another purchase', async () => {
   script = [{ reply: { status: 400, headers: { 'request-id': 'req_offline400' }, body: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'bad' } }) } },
     reply('Sure. What would you like to know?')];
   const call = await placeCall();
   const first = await call.say('Tell me about HELOCs.');
-  assert.equal(first.message.token, RELAY_LINES.retry);
+  assert.equal(first.message.token, RELAY_LINES.unavailable);
   assert.equal(current.repository.money.held, 0, 'a known refusal releases, it is not held');
-  const second = await call.say('Tell me about HELOCs, please.');
-  latencies.push(second.latencyMs);
-  assert.equal(second.message.token, 'Sure. What would you like to know?');
+  assert.equal(modelRequests.length, 1, 'no second purchase after failure');
   const failure = serverLogs.find((line) => line.event === 'relay_turn' && line.status === 'provider_failed');
   assert.deepEqual([failure.httpStatus, failure.errorType, failure.providerRequestId], [400, 'invalid_request_error', 'req_offline400']);
   call.close();
