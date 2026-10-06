@@ -81,11 +81,16 @@ const coreBodies = [];
 
 // --- Intercept exactly two URLs ----------------------------------------------
 const realFetch = globalThis.fetch;
+const inProgressCalls = new Set();
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input instanceof URL ? input.href : input);
   if (/^https:\/\/api.twilio.com\/2010-04-01\/Accounts\/AC0{32}\/Calls\/CA[a-f0-9]{32}\.json$/.test(url)) {
-    assert.equal(init.body, 'TimeLimit=105');
-    return new Response(JSON.stringify({ sid: url.split('/').at(-1).slice(0, -5), account_sid: 'AC' + '0'.repeat(32) }));
+    const callSid = url.split('/').at(-1).slice(0, -5);
+    if (!inProgressCalls.has(callSid)) return new Response(JSON.stringify({ code: 21220,
+      message: 'Call is not in-progress. Cannot update.' }), { status: 400 });
+    const seconds = Number(new URLSearchParams(init.body).get('TimeLimit'));
+    assert.equal(seconds, 90); // Total duration from answer, not remaining time.
+    return new Response(JSON.stringify({ sid: callSid, account_sid: 'AC' + '0'.repeat(32) }));
   }
   if (url === ADMISSION_URL) throw new Error('relay mode must not use the Netlify admission endpoint');
   if (url === RELAY_URL) {
@@ -110,13 +115,27 @@ await new Promise((resolve) => setTimeout(resolve, 200));
 // --- Simulated Twilio --------------------------------------------------------
 async function placeCall() {
   const callSid = `CA${randomBytes(16).toString('hex')}`;
-  const params = { AccountSid: 'AC' + '0'.repeat(32), CallSid: callSid, From: OWNER, To: '+14243041032' };
+  const params = { AccountSid: 'AC' + '0'.repeat(32), CallSid: callSid, From: OWNER, To: '+14243041032', CallStatus: 'ringing' };
   const signature = twilioSignature(`https://${HOST}/voice`, params, AUTH_TOKEN);
   const response = await realFetch(`http://127.0.0.1:${PORT}/voice`, { method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-host': HOST, 'x-forwarded-proto': 'https', 'x-twilio-signature': signature },
     body: new URLSearchParams(params) });
   assert.equal(response.status, 200);
-  const twiml = await response.text();
+  const bootstrap = await response.text();
+  assert.match(bootstrap, /<Say language="en-US" voice="woman" loop="1">Hi, you.*West Coast Capital Mortgage.*recorded for quality.*not a licensed loan officer/);
+  assert.doesNotMatch(bootstrap, /ConversationRelay/);
+  const redirect = bootstrap.match(/<Redirect method="POST">([^<]+)<\/Redirect>/)[1].replaceAll('&amp;', '&');
+  const redirectUrl = new URL(redirect, `https://${HOST}`);
+  assert.equal(redirectUrl.hash, '#ct=1000&rt=5000&tt=5000&rc=0');
+  const path = redirectUrl.pathname + redirectUrl.search; // Fragment is not signed/sent.
+  inProgressCalls.add(callSid); // Simulated execution of Say answers the call.
+  const connectedParams = { ...params, CallStatus: 'in-progress' };
+  const connected = await realFetch(`http://127.0.0.1:${PORT}${path}`, { method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-host': HOST,
+      'x-forwarded-proto': 'https', 'x-twilio-signature': twilioSignature(`https://${HOST}${path}`, connectedParams, AUTH_TOKEN) },
+    body: new URLSearchParams(connectedParams) });
+  assert.equal(connected.status, 200);
+  const twiml = await connected.text();
   const attribute = (name) => twiml.match(new RegExp(`${name}="([^"]*)"`))?.[1];
   const session = twiml.match(/name="session" value="([^"]+)"/)[1];
   const socket = new WebSocket(`ws://127.0.0.1:${PORT}/relay`, { headers: { 'x-forwarded-host': HOST,
@@ -143,7 +162,7 @@ async function placeCall() {
     const reply = await next();
     return { ...reply, latencyMs: reply ? reply.at - sentAt : null };
   }
-  return { callSid, twiml, attribute, send, say, next, close: () => socket.close() };
+  return { callSid, bootstrap, twiml, attribute, send, say, next, close: () => socket.close() };
 }
 
 const results = [];
@@ -161,7 +180,8 @@ await scenario('1 greeting: disclosures first, not interruptible, recorded as th
   script = [];
   const call = await placeCall();
   assert.equal(current.repository.admissions.length, 1, 'admitted through Core with the relay credential');
-  assert.match(call.attribute('welcomeGreeting'), /recorded for quality.*not a licensed loan officer.*How can I help you today\?/);
+  assert.match(call.bootstrap, /recorded for quality.*not a licensed loan officer/);
+  assert.equal(call.attribute('welcomeGreeting'), 'How can I help you today?');
   assert.equal(call.attribute('welcomeGreetingInterruptible'), 'none');
   assert.equal(current.repository.state.history[0].role, 'assistant');
   assert.match(current.repository.state.history[0].text, /This call may be recorded/);
